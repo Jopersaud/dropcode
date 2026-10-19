@@ -6,7 +6,7 @@ import { log } from "./log.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cfg = loadConfig(process.env, join(here, "..", "..", "web", "dist"));
-const app = createAppServer(cfg);
+const app = createAppServer(cfg, cfg.roomTtlMs ? { rooms: { ttlMs: cfg.roomTtlMs } } : {});
 
 app.server.listen(cfg.port, cfg.host, () => {
   const addr = app.server.address();

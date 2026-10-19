@@ -14,6 +14,8 @@ export interface ServerConfig {
   turnSecret: string;
   turnCredentialTtlSec: number;
   webRoot: string;
+  /** Override the 10-minute room TTL (mainly for tests). */
+  roomTtlMs: number | undefined;
 }
 
 const list = (v: string | undefined, dflt: string[]) =>
@@ -32,6 +34,7 @@ export function loadConfig(env: NodeJS.ProcessEnv, webRoot: string): ServerConfi
     turnSecret: env.TURN_SECRET ?? "",
     turnCredentialTtlSec: Number(env.TURN_CREDENTIAL_TTL ?? 3600),
     webRoot: env.WEB_ROOT ?? webRoot,
+    roomTtlMs: env.ROOM_TTL_MS ? Number(env.ROOM_TTL_MS) : undefined,
   };
 }
 

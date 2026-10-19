@@ -28,6 +28,7 @@ export type Phase =
   | "authenticating"
   | "transferring"
   | "verifying"
+  | "reconnecting" // peer link dropped; waiting to resume
   | "done"
   | "failed"
   | "cancelled";
@@ -226,6 +227,7 @@ abstract class Transfer {
       if (typeof ev.data === "string") {
         const m = parsePeerMessage(ev.data);
         if (!m) rd.fail(new TransferError("protocol", "malformed peer message"));
+        else if (m.t === "cancel") this.fail(new TransferError("cancelled_by_peer"));
         else rd.push(m);
       } else onBinary(ev.data as ArrayBuffer);
     };

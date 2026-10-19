@@ -71,3 +71,27 @@ esbuild; the server bundle includes `ws`, so the runtime Docker image needs no
 `node_modules`. Runtime dependency: `ws`. Bundled into the client: `@noble/hashes`.
 Everything is pinned to exact versions. `.npmrc` sets `legacy-peer-deps` to work around an
 npm 10 arborist crash on vitest's optional peer dependencies.
+
+## Phase 2: progress, cancel, errors, drag and drop
+
+- **Progress** is computed from bytes acknowledged, not bytes queued: the sender reports
+  `sent - dc.bufferedAmount`, the receiver counts stored chunks. Speed is a 3-second
+  sliding window (`web/src/progress.ts`), ETA = remaining / speed. Rendering is coalesced
+  to one update per animation frame. Sizes use decimal units (MB = 10^6 bytes).
+- **Cancel** from either side sends a `cancel` control message over the data channel
+  (fast path) *and* `cancel` to the server (which destroys the room and tells the other
+  side, so it still works if the data channel is wedged). A cancelled code is spent.
+- **Error states** each have a stable code (`data-error` on the card, used by the e2e
+  tests) and a human message: bad code, unknown code, expired, already used, burned,
+  room full, rate limited, peer disconnected, cancelled by peer, hash mismatch, auth
+  failed, too large for a browser, no direct connection possible (suggests TURN), lost
+  server connection.
+- **Drag and drop**: the whole window is a drop target while the send card is idle (the
+  dashed zone highlights). Multiple files are rejected with a hint to zip them; folder
+  transfer is out of scope.
+- **Share links**: "Copy link" produces `https://host/#<code>`. The code lives in the URL
+  fragment, which browsers never send to the server, and the page removes it from the
+  address bar after reading it.
+- **Testing corruption** without a production test hook: the e2e test monkeypatches
+  `RTCDataChannel.prototype.send` in the sender page to flip one byte in flight.
+- `ROOM_TTL_MS` env var overrides the TTL (used by the expiry e2e test).

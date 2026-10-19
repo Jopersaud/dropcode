@@ -3,29 +3,82 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>dropcode</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <main>
-    <h1>dropcode</h1>
-    <p class="tagline">Send a file to anyone with a short code. Peer to peer, no accounts.</p>
+    <header>
+      <h1>dropcode</h1>
+      <p class="tagline">Send a file to anyone with a short code. Peer to peer, end-to-end authenticated, no accounts.</p>
+    </header>
 
-    <section id="send" class="card" data-phase="idle">
-      <h2>Send</h2>
-      <input type="file" id="send-file">
-      <p id="send-code" class="code" hidden></p>
-      <p id="send-status" class="status" role="status"></p>
+    <section id="send" class="card" data-phase="idle" aria-labelledby="send-title">
+      <h2 id="send-title">Send</h2>
+
+      <label id="drop-zone" class="drop-zone" data-show="idle">
+        <input type="file" id="send-file">
+        <span class="drop-main">Drop a file here</span>
+        <span class="drop-sub">or click to choose one</span>
+      </label>
+
+      <div class="file-info" data-show="active">
+        <span id="send-name" class="file-name"></span>
+        <span id="send-size" class="file-size"></span>
+      </div>
+
+      <div class="code-box" data-show="waiting">
+        <p class="hint">Give the receiver this code:</p>
+        <p id="send-code" class="code"></p>
+        <div class="row">
+          <button type="button" id="copy-code" class="secondary">Copy code</button>
+          <button type="button" id="copy-link" class="secondary">Copy link</button>
+        </div>
+        <p id="send-expiry" class="hint"></p>
+      </div>
+
+      <div class="progress" data-show="progress">
+        <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-labelledby="send-title"><span id="send-bar"></span></div>
+        <p id="send-stats" class="stats"></p>
+      </div>
+
+      <p id="send-status" class="status" role="status" aria-live="polite"></p>
+      <p id="send-error" class="error" role="alert" hidden></p>
+
+      <div class="row">
+        <button type="button" id="send-cancel" class="danger" data-show="cancellable">Cancel</button>
+        <button type="button" id="send-reset" data-show="terminal">Send another file</button>
+      </div>
     </section>
 
-    <section id="receive" class="card" data-phase="idle">
-      <h2>Receive</h2>
-      <form id="receive-form">
-        <input id="receive-code" placeholder="4-apple-river" autocomplete="off" spellcheck="false">
+    <section id="receive" class="card" data-phase="idle" aria-labelledby="receive-title">
+      <h2 id="receive-title">Receive</h2>
+
+      <form id="receive-form" class="row" data-show="idle">
+        <label for="receive-code" class="visually-hidden">Code</label>
+        <input id="receive-code" placeholder="4-apple-river" autocomplete="off" autocapitalize="none" spellcheck="false" required>
         <button id="receive-btn" type="submit">Receive</button>
       </form>
-      <p id="receive-status" class="status" role="status"></p>
-      <a id="download-link" hidden>Save file</a>
+
+      <div class="file-info" data-show="meta">
+        <span id="receive-name" class="file-name"></span>
+        <span id="receive-size" class="file-size"></span>
+      </div>
+
+      <div class="progress" data-show="progress">
+        <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-labelledby="receive-title"><span id="receive-bar"></span></div>
+        <p id="receive-stats" class="stats"></p>
+      </div>
+
+      <p id="receive-status" class="status" role="status" aria-live="polite"></p>
+      <p id="receive-error" class="error" role="alert" hidden></p>
+      <a id="download-link" class="button" data-show="done">Save file</a>
+
+      <div class="row">
+        <button type="button" id="receive-cancel" class="danger" data-show="cancellable">Cancel</button>
+        <button type="button" id="receive-reset" data-show="terminal">Receive another file</button>
+      </div>
     </section>
   </main>
   <script type="module" src="/app.js"></script>
