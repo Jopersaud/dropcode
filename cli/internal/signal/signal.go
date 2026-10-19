@@ -24,6 +24,7 @@ type SignalData struct {
 type ServerMessage struct {
 	T               string             `json:"t"`
 	IceServers      []webrtc.ICEServer `json:"iceServers"`
+	IcePolicy       string             `json:"iceTransportPolicy"`
 	Nameplate       string             `json:"nameplate"`
 	Token           string             `json:"token"`
 	ExpiresAt       int64              `json:"expiresAt"`

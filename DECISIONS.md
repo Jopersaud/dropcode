@@ -223,3 +223,32 @@ for its own result over the data channel.
   unless `DROPCODE_DEBUG` is set.
 - **Server URL** defaults to `$DROPCODE_SERVER`, else `http://localhost:8080`; `-server`
   accepts `https://host`, `host:port` or a full `wss://host/ws` URL.
+
+## Phase 6: packaging and deployment
+
+- **Image**: two-stage build on `node:22.22.0-alpine3.22`, pinned by tag *and* digest. The
+  runtime stage holds only the esbuild bundle of the server (with `ws` inside) and the
+  minified web client, and runs as the unprivileged `node` user with a `/healthz` health
+  check. `npm ci --ignore-scripts` keeps dependency install scripts out of the build.
+- **coturn** (`coturn/coturn:4.7.0`, digest-pinned) uses `use-auth-secret`: the server
+  mints per-client credentials valid for 1 h (`TURN_SECRET`), so no long-lived TURN
+  password is shipped to browsers. Relaying to private/loopback/link-local/CGNAT ranges is
+  denied, to stop the relay being used as an SSRF pivot into the host's network.
+- **A deployment bug found by actually testing TURN**: behind Docker port mapping, coturn
+  maps its advertised public relay address back to its container address, so two peers
+  relayed by the *same* server were blocked by the private-range deny rule. Compose now
+  pins coturn to `172.30.0.10` on its own network, relays on that address, advertises
+  `PUBLIC_IP/172.30.0.10`, and allow-lists exactly that one address. Also removed
+  `--no-tlsv1*`, which coturn 4.7 no longer accepts.
+- **`ICE_TRANSPORT_POLICY=relay`** forces relay-only ICE in both clients. It's a privacy
+  option (peers never learn each other's IPs) and makes TURN testable: with it, the e2e
+  suite moved 50 MB browser↔browser, CLI→browser and browser→CLI through the compose
+  stack, asserting the selected ICE pair is `relay->relay`.
+- **Fly.io**: exactly one always-on machine (`auto_stop_machines = "off"`,
+  `min_machines_running = 1`), because rooms are in memory. Scaling out would need shared
+  room state (e.g. Redis) and sticky routing by nameplate. That isn't built; the README
+  says so. TURN is recommended on a separate VPS or a managed service, because coturn's UDP
+  port ranges don't fit Fly's networking well.
+- **Reproducibility check**: `cargo clean && npm run build:pake` reproduces
+  `shared/pake.wasm` byte for byte
+  (sha256 `839fa479…2968`) with the pinned toolchain.

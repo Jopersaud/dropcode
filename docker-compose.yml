@@ -1,0 +1,74 @@
+# dropcode + coturn. Usage:
+#   cp .env.example .env    # set PUBLIC_IP and TURN_SECRET
+#   docker compose up --build
+# Then open http://<PUBLIC_IP>:8080 (put a TLS proxy in front for real use:
+# browsers need HTTPS for anything but localhost).
+services:
+  dropcode:
+    build: .
+    image: dropcode:local
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Short-lived TURN credentials are minted per client from TURN_SECRET
+      # (coturn's "use-auth-secret" / TURN REST API scheme).
+      TURN_URL: "turn:${PUBLIC_IP:?set PUBLIC_IP in .env}:3478?transport=udp,turn:${PUBLIC_IP}:3478?transport=tcp"
+      TURN_SECRET: "${TURN_SECRET:?set TURN_SECRET in .env}"
+      ICE_TRANSPORT_POLICY: "${ICE_TRANSPORT_POLICY:-all}"
+      TRUST_PROXY: "${TRUST_PROXY:-}"
+    depends_on:
+      - coturn
+    networks:
+      - dropcode
+
+  coturn:
+    image: coturn/coturn:4.7.0@sha256:a00afb5b4890de4df22bbe70379c6b316685dffee297d53cac1271dcb91fab93
+    restart: unless-stopped
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "49160-49200:49160-49200/udp"
+    networks:
+      dropcode:
+        # Fixed so it can be named as the relay address below.
+        ipv4_address: 172.30.0.10
+    command:
+      - -n
+      - --log-file=stdout
+      - --listening-port=3478
+      - --min-port=49160
+      - --max-port=49200
+      - --realm=dropcode
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SECRET}
+      # Relay on the container address and advertise the public one (the host
+      # forwards the published ports to the container).
+      - --relay-ip=172.30.0.10
+      - --external-ip=${PUBLIC_IP}/172.30.0.10
+      - --fingerprint
+      - --no-cli
+      - --no-multicast-peers
+      # Don't let the relay be used to reach private networks (SSRF). When both
+      # peers are relayed by this server, coturn maps the public relay address
+      # back to its own container address, so that one address is allowed.
+      - --allowed-peer-ip=172.30.0.10
+      - --denied-peer-ip=0.0.0.0-0.255.255.255
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=100.64.0.0-100.127.255.255
+      - --denied-peer-ip=127.0.0.0-127.255.255.255
+      - --denied-peer-ip=169.254.0.0-169.254.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
+      - --denied-peer-ip=::1
+      - --denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+      - --denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+      - --total-quota=100
+      - --user-quota=12
+      - --max-bps=0
+
+networks:
+  dropcode:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

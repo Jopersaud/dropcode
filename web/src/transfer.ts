@@ -145,6 +145,7 @@ const BACKOFF = [250, 500, 1000, 2000, 4000, 8000];
 abstract class Transfer {
   protected sig: Signaling | null = null;
   protected iceServers: RTCIceServer[] = [];
+  protected icePolicy: RTCIceTransportPolicy = "all";
   protected link: PeerLink | null = null;
   /** True while the current link has passed key confirmation. */
   protected linkAuthed = false;
@@ -184,6 +185,7 @@ abstract class Transfer {
       throw new TransferError("signaling_failed");
     });
     this.iceServers = hello.iceServers;
+    this.icePolicy = hello.iceTransportPolicy === "relay" ? "relay" : "all";
     return sig;
   }
 
@@ -257,7 +259,11 @@ abstract class Transfer {
 
   protected newLink(initiator: boolean): PeerLink {
     this.dropLink();
-    const link = new PeerLink(this.iceServers, (data) => this.sig?.send({ t: "signal", data }), initiator);
+    const link = new PeerLink(
+      { iceServers: this.iceServers, iceTransportPolicy: this.icePolicy },
+      (data) => this.sig?.send({ t: "signal", data }),
+      initiator,
+    );
     this.link = link;
     this.setPhase("connecting-peer");
     link.onfail = (reason) => {

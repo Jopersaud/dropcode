@@ -75,7 +75,12 @@ export function createSignaling(cfg: ServerConfig, opts: SignalingOptions = {}) 
       ws.close(1008);
     };
 
-    peer.send({ t: "hello", iceServers: iceServersFor(cfg), ttlMs: rooms.opts.ttlMs });
+    peer.send({
+      t: "hello",
+      iceServers: iceServersFor(cfg),
+      iceTransportPolicy: cfg.iceTransportPolicy,
+      ttlMs: rooms.opts.ttlMs,
+    });
 
     ws.on("message", (data, isBinary) => {
       if (!bucket.take()) return reject("rate_limited");

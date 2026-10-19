@@ -44,7 +44,7 @@ export type ErrorCode =
 export type CloseReason = "done" | "cancelled" | "expired" | "burned" | "sender_left";
 
 export type ServerMessage =
-  | { t: "hello"; iceServers: IceServer[]; ttlMs: number }
+  | { t: "hello"; iceServers: IceServer[]; iceTransportPolicy: "all" | "relay"; ttlMs: number }
   | { t: "created"; nameplate: string; token: string; expiresAt: number }
   | { t: "reclaimed"; receiverPresent: boolean }
   | { t: "joined" }

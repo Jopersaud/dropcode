@@ -10,7 +10,11 @@ const app = createAppServer(cfg, cfg.roomTtlMs ? { rooms: { ttlMs: cfg.roomTtlMs
 
 app.server.listen(cfg.port, cfg.host, () => {
   const addr = app.server.address();
-  log("listening", { port: typeof addr === "object" && addr ? addr.port : cfg.port, turn: cfg.turnUrls.length > 0 });
+  log("listening", {
+    port: typeof addr === "object" && addr ? addr.port : cfg.port,
+    turn: cfg.turnUrls.length > 0,
+    relayOnly: cfg.iceTransportPolicy === "relay",
+  });
 });
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {

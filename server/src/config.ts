@@ -14,6 +14,8 @@ export interface ServerConfig {
   turnSecret: string;
   turnCredentialTtlSec: number;
   webRoot: string;
+  /** "relay" forces all peers through TURN (hides IPs from each other); default "all". */
+  iceTransportPolicy: "all" | "relay";
   /** Override the 10-minute room TTL (mainly for tests). */
   roomTtlMs: number | undefined;
 }
@@ -34,6 +36,7 @@ export function loadConfig(env: NodeJS.ProcessEnv, webRoot: string): ServerConfi
     turnSecret: env.TURN_SECRET ?? "",
     turnCredentialTtlSec: Number(env.TURN_CREDENTIAL_TTL ?? 3600),
     webRoot: env.WEB_ROOT ?? webRoot,
+    iceTransportPolicy: env.ICE_TRANSPORT_POLICY === "relay" ? "relay" : "all",
     roomTtlMs: env.ROOM_TTL_MS ? Number(env.ROOM_TTL_MS) : undefined,
   };
 }

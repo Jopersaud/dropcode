@@ -79,6 +79,7 @@ type core struct {
 
 	sig        *signal.Client
 	ice        []webrtc.ICEServer
+	relayOnly  bool
 	link       *rtc.Link
 	linkAuthed bool
 	everAuthed bool
@@ -218,6 +219,7 @@ func (c *core) openSignaling(ctx context.Context) (*signal.Client, error) {
 		}
 		c.sig = sig
 		c.ice = sig.Hello.IceServers
+		c.relayOnly = sig.Hello.IcePolicy == "relay"
 	})
 	go func() {
 		for m := range sig.Msgs {
@@ -265,7 +267,7 @@ func (c *core) onClosed(reason string) {
 
 func (c *core) newLink(initiator bool, session func(*rtc.Link) error) (*rtc.Link, error) {
 	c.dropLink()
-	link, err := rtc.New(c.ice, func(d signal.SignalData) {
+	link, err := rtc.New(c.ice, c.relayOnly, func(d signal.SignalData) {
 		c.post(func() { c.sendServer(map[string]any{"t": "signal", "data": d}) })
 	}, initiator)
 	if err != nil {

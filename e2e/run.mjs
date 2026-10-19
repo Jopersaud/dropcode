@@ -97,6 +97,23 @@ async function freshDir(name) {
   return dir;
 }
 
+/** The local and remote candidate types of the browser's selected ICE pair. */
+async function iceRoute(page, who) {
+  return page.evaluate(async (who) => {
+    const pc = window[who].link.pc;
+    const stats = [...(await pc.getStats()).values()];
+    const pair = stats.find((s) => s.type === "candidate-pair" && s.nominated && s.state === "succeeded");
+    const get = (id) => stats.find((s) => s.id === id);
+    return pair ? `${get(pair.localCandidateId).candidateType}->${get(pair.remoteCandidateId).candidateType}` : "none";
+  }, who);
+}
+
+async function checkRoute(page, who) {
+  const route = await iceRoute(page, who);
+  console.log(`  ICE route (${who.slice(2)}): ${route}`);
+  if (process.env.E2E_EXPECT_RELAY) assert(route.startsWith("relay->"), `expected a TURN relay route, got ${route}`);
+}
+
 const wrongCode = (code) => code.replace(/-[a-z]+$/, code.endsWith("-abandon") ? "-zoo" : "-abandon");
 
 const scenarios = {
@@ -112,6 +129,8 @@ const scenarios = {
     await startReceive(receiver, server.url, code);
     // Progress UI shows percent, speed and ETA while bytes flow.
     await waitPercent(receiver, "#receive-stats", 20);
+    await checkRoute(receiver, "__receiver");
+    await checkRoute(sender, "__sender");
     const stats = await receiver.textContent("#receive-stats");
     const sstats = await sender.textContent("#send-stats");
     assert(/%.*of.*\/s.*left/.test(stats), `receiver stats: ${stats}`);
@@ -347,6 +366,8 @@ const scenarios = {
     const dl = receiver.waitForEvent("download", { timeout: 120_000 });
     const t0 = Date.now();
     await startReceive(receiver, server.url, code);
+    await waitPercent(receiver, "#receive-stats", 10);
+    await checkRoute(receiver, "__receiver");
     const download = await dl;
     const out = join(tmp, "received-from-cli.bin");
     await download.saveAs(out);
@@ -363,7 +384,10 @@ const scenarios = {
     const code = await sendAndGetCode(sender, server.url, file.path);
     const dir = await freshDir("cli-out");
     const t0 = Date.now();
-    const res = await runCli(["receive", "-q", "-server", server.url, "-o", dir, code]).exited;
+    const cli = runCli(["receive", "-q", "-server", server.url, "-o", dir, code]);
+    await waitPercent(sender, "#send-stats", 10);
+    await checkRoute(sender, "__sender");
+    const res = await cli.exited;
     assert(res.code === 0, `cli exit ${res.code}: ${res.stderr}`);
     const out = res.stdout.trim();
     assert(out === join(dir, file.path.split("/").pop()), `saved as ${out}`);
@@ -480,7 +504,9 @@ try {
     process.stdout.write(`- ${name}\n`);
     // A fresh server per scenario: all browsers share 127.0.0.1, so per-IP rate
     // limits would otherwise leak between scenarios.
-    const server = await startServer();
+    const server = process.env.E2E_SERVER_URL
+      ? { url: process.env.E2E_SERVER_URL, logs: [], stop() {} }
+      : await startServer();
     try {
       await fn({ server, newPage });
       console.log(`  PASS`);

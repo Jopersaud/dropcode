@@ -77,8 +77,12 @@ func getAPI() *webrtc.API {
 	return api
 }
 
-func New(iceServers []webrtc.ICEServer, sendSignal func(signal.SignalData), initiator bool) (*Link, error) {
-	pc, err := getAPI().NewPeerConnection(webrtc.Configuration{ICEServers: iceServers})
+func New(iceServers []webrtc.ICEServer, relayOnly bool, sendSignal func(signal.SignalData), initiator bool) (*Link, error) {
+	cfg := webrtc.Configuration{ICEServers: iceServers}
+	if relayOnly {
+		cfg.ICETransportPolicy = webrtc.ICETransportPolicyRelay
+	}
+	pc, err := getAPI().NewPeerConnection(cfg)
 	if err != nil {
 		return nil, err
 	}

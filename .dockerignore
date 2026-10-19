@@ -1,0 +1,9 @@
+node_modules
+server/dist
+web/dist
+pake/target
+cli
+e2e
+.git
+*.md
+!README.md

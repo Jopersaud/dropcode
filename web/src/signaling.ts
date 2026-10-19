@@ -7,7 +7,7 @@ export type SignalData =
   | { kind: "end-of-candidates" };
 
 export type ServerMessage =
-  | { t: "hello"; iceServers: RTCIceServer[]; ttlMs: number }
+  | { t: "hello"; iceServers: RTCIceServer[]; iceTransportPolicy?: RTCIceTransportPolicy; ttlMs: number }
   | { t: "created"; nameplate: string; token: string; expiresAt: number }
   | { t: "reclaimed"; receiverPresent: boolean }
   | { t: "joined" }

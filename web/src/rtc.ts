@@ -26,11 +26,11 @@ export class PeerLink {
   onfail: (reason: string) => void = () => {};
 
   constructor(
-    iceServers: RTCIceServer[],
+    config: RTCConfiguration,
     private readonly sendSignal: (data: SignalData) => void,
     private readonly initiator: boolean,
   ) {
-    this.pc = new RTCPeerConnection({ iceServers });
+    this.pc = new RTCPeerConnection(config);
     this.pc.onicecandidate = (ev) => {
       if (ev.candidate) this.signal({ kind: "candidate", candidate: ev.candidate.toJSON() });
       else this.signal({ kind: "end-of-candidates" });
