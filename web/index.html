@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dropcode</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <h1>dropcode</h1>
+    <p class="tagline">Send a file to anyone with a short code. Peer to peer, no accounts.</p>
+
+    <section id="send" class="card" data-phase="idle">
+      <h2>Send</h2>
+      <input type="file" id="send-file">
+      <p id="send-code" class="code" hidden></p>
+      <p id="send-status" class="status" role="status"></p>
+    </section>
+
+    <section id="receive" class="card" data-phase="idle">
+      <h2>Receive</h2>
+      <form id="receive-form">
+        <input id="receive-code" placeholder="4-apple-river" autocomplete="off" spellcheck="false">
+        <button id="receive-btn" type="submit">Receive</button>
+      </form>
+      <p id="receive-status" class="status" role="status"></p>
+      <a id="download-link" hidden>Save file</a>
+    </section>
+  </main>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
