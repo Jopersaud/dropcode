@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { AuthError, authenticate, sdpFingerprints, type AuthChannel } from "../src/auth.ts";
+import { readFileSync } from "node:fs";
+import { AuthError, authenticate, confirmationMac, sdpFingerprints, transcript, type AuthChannel } from "../src/auth.ts";
 import { pakeStart } from "../src/pake.ts";
 
 const enc = new TextEncoder();
@@ -135,5 +136,17 @@ describe("authenticate", () => {
     const a = sdpFingerprints(`a=fingerprint:SHA-256 ab:cd\r\na=fingerprint:sha-256 AB:CD\n`);
     expect(a).toBe("sha-256 AB:CD");
     expect(() => sdpFingerprints("v=0\r\n")).toThrow();
+  });
+});
+
+describe("key confirmation test vectors", () => {
+  const { vectors } = JSON.parse(readFileSync(new URL("../../shared/auth-vectors.json", import.meta.url), "utf8"));
+  it.each(vectors)("matches the reference implementation", async (v: any) => {
+    const K = Uint8Array.from(v.key.match(/../g).map((h: string) => parseInt(h, 16)));
+    const T = transcript(v.fpSender, v.fpReceiver);
+    expect(new TextDecoder().decode(T)).toBe(v.transcript);
+    const hex = (u: Uint8Array) => [...u].map((b) => b.toString(16).padStart(2, "0")).join("");
+    expect(hex(await confirmationMac(K, T, "sender"))).toBe(v.mac_sender);
+    expect(hex(await confirmationMac(K, T, "receiver"))).toBe(v.mac_receiver);
   });
 });

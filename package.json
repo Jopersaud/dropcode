@@ -18,7 +18,10 @@
     "test": "vitest run",
     "e2e": "node e2e/run.mjs",
     "build:pake": "sh scripts/build-pake.sh",
-    "test:pake": "cd pake && cargo test --locked --release"
+    "test:pake": "cd pake && cargo test --locked --release",
+    "build:cli": "cd cli && go build -trimpath -ldflags='-s -w' -o bin/dropcode .",
+    "test:cli": "cd cli && go vet ./... && go test -race ./...",
+    "sync:shared": "sh scripts/sync-shared.sh"
   },
   "dependencies": {
     "ws": "8.22.0"

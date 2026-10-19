@@ -83,3 +83,23 @@ export const randomName = () => `e2e-${randomBytes(4).toString("hex")}.bin`;
 export function assert(cond, msg) {
   if (!cond) throw new Error(`assertion failed: ${msg}`);
 }
+
+export const cliBin = process.env.DROPCODE_CLI ?? join(root, "cli/bin/dropcode");
+
+/** Run the Go CLI. Resolves `code` with the first stdout line (the code, for send). */
+export function runCli(args, opts = {}) {
+  const proc = spawn(cliBin, args, { stdio: ["ignore", "pipe", "pipe"], ...opts });
+  let stdout = "", stderr = "";
+  let resolveLine;
+  const firstLine = new Promise((r) => (resolveLine = r));
+  proc.stdout.on("data", (d) => {
+    stdout += d;
+    if (stdout.includes("\n")) resolveLine(stdout.split("\n")[0].trim());
+  });
+  proc.stderr.on("data", (d) => {
+    stderr += d;
+    if (process.env.E2E_DEBUG) process.stderr.write(`  [cli] ${String(d).replace(/\r/g, "\n")}`);
+  });
+  const exited = new Promise((r) => proc.on("exit", (code, signal) => r({ code, signal, stdout, stderr })));
+  return { proc, firstLine, exited, get stderr() { return stderr; } };
+}

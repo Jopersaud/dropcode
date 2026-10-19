@@ -8,6 +8,5 @@ cd "$root/pake"
 RUSTFLAGS="--remap-path-prefix=$root=/dropcode --remap-path-prefix=$HOME=/home" \
   cargo build --locked --release --target wasm32-unknown-unknown
 cp target/wasm32-unknown-unknown/release/dropcode_pake.wasm "$root/shared/pake.wasm"
-mkdir -p "$root/cli/internal/pake"
-cp "$root/shared/pake.wasm" "$root/cli/internal/pake/pake.wasm"
+sh "$root/scripts/sync-shared.sh"
 sha256sum "$root/shared/pake.wasm"

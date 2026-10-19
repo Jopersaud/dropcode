@@ -1,7 +1,9 @@
 // End-to-end scenarios. Usage: node e2e/run.mjs [scenario ...]
 import { join } from "node:path";
 import { mitmPageScript, startEvilServer } from "./evil-server.mjs";
-import { assert, launch, makeFile, randomName, sha256File, startServer, tmp } from "./lib.mjs";
+import { existsSync, readdirSync } from "node:fs";
+import { mkdir, rm } from "node:fs/promises";
+import { assert, cliBin, runCli, launch, makeFile, randomName, sha256File, startServer, tmp } from "./lib.mjs";
 
 const SIZE = Number(process.env.E2E_SIZE ?? 50 * 1024 * 1024);
 
@@ -86,6 +88,13 @@ async function resumeScenario(ctx, breakIt, { expectResume = true } = {}) {
   } else {
     assert(sessions.length === 1 && chunksSent === total, "transfer continued on the same link");
   }
+}
+
+async function freshDir(name) {
+  const dir = join(tmp, name);
+  await rm(dir, { recursive: true, force: true });
+  await mkdir(dir, { recursive: true });
+  return dir;
 }
 
 const wrongCode = (code) => code.replace(/-[a-z]+$/, code.endsWith("-abandon") ? "-zoo" : "-abandon");
@@ -327,6 +336,118 @@ const scenarios = {
     } finally {
       evil.stop();
     }
+  },
+
+  async "cli-to-web"({ server, newPage }) {
+    const file = await makeFile(randomName(), SIZE);
+    const cli = runCli(["send", "-server", server.url, file.path]);
+    const code = await cli.firstLine;
+    assert(/^[1-9]\d*-[a-z]+-[a-z]+$/.test(code), `cli code: ${code}`);
+    const receiver = await newPage();
+    const dl = receiver.waitForEvent("download", { timeout: 120_000 });
+    const t0 = Date.now();
+    await startReceive(receiver, server.url, code);
+    const download = await dl;
+    const out = join(tmp, "received-from-cli.bin");
+    await download.saveAs(out);
+    assert((await sha256File(out)) === file.sha256, "hash matches (CLI -> browser)");
+    assert(download.suggestedFilename() === file.path.split("/").pop(), "name preserved");
+    const res = await cli.exited;
+    assert(res.code === 0, `cli exit ${res.code}: ${res.stderr}`);
+    console.log(`  CLI -> browser: ${(SIZE / 1048576).toFixed(0)} MB in ${((Date.now() - t0) / 1000).toFixed(1)}s, hash matches`);
+  },
+
+  async "web-to-cli"({ server, newPage }) {
+    const file = await makeFile(randomName(), SIZE);
+    const sender = await newPage();
+    const code = await sendAndGetCode(sender, server.url, file.path);
+    const dir = await freshDir("cli-out");
+    const t0 = Date.now();
+    const res = await runCli(["receive", "-q", "-server", server.url, "-o", dir, code]).exited;
+    assert(res.code === 0, `cli exit ${res.code}: ${res.stderr}`);
+    const out = res.stdout.trim();
+    assert(out === join(dir, file.path.split("/").pop()), `saved as ${out}`);
+    assert((await sha256File(out)) === file.sha256, "hash matches (browser -> CLI)");
+    await sender.waitForSelector('#send[data-phase="done"]', { timeout: 10_000 });
+    assert(readdirSync(dir).length === 1, `no leftovers: ${readdirSync(dir)}`);
+    console.log(`  browser -> CLI: ${(SIZE / 1048576).toFixed(0)} MB in ${((Date.now() - t0) / 1000).toFixed(1)}s, hash matches`);
+  },
+
+  async "cli-to-cli"({ server }) {
+    const file = await makeFile(randomName(), 20 * 1024 * 1024);
+    const send = runCli(["send", "-q", "-server", server.url, file.path]);
+    const code = await send.firstLine;
+    const dir = await freshDir("cli-cli");
+    const res = await runCli(["receive", "-q", "-server", server.url, "-o", dir, code]).exited;
+    assert(res.code === 0, `receive exit ${res.code}: ${res.stderr}`);
+    assert((await sha256File(res.stdout.trim())) === file.sha256, "hash matches (CLI -> CLI)");
+    assert((await send.exited).code === 0, "sender exit 0");
+  },
+
+  async "cli-wrong-code"({ server, newPage }) {
+    const file = await makeFile(randomName(), 1024 * 1024);
+    const sender = await newPage();
+    const code = await sendAndGetCode(sender, server.url, file.path);
+    const dir = await freshDir("cli-wrong");
+    const res = await runCli(["receive", "-q", "-server", server.url, "-o", dir, wrongCode(code)]).exited;
+    assert(res.code === 1 && /couldn't verify/.test(res.stderr), `cli: ${res.code} ${res.stderr}`);
+    await sender.waitForSelector("#send-notice:not([hidden])", { timeout: 10_000 });
+    assert(readdirSync(dir).length === 0, "nothing written for a wrong code");
+    console.log(`  CLI with wrong code: "${res.stderr.trim().split("\n").pop()}"`);
+    // And the real code still works afterwards.
+    const ok = await runCli(["receive", "-q", "-server", server.url, "-o", dir, code]).exited;
+    assert(ok.code === 0 && (await sha256File(ok.stdout.trim())) === file.sha256, "real code works after a failed attempt");
+  },
+
+  async "cli-resume"({ server, newPage }) {
+    // Kill the CLI receiver mid-transfer (no chance to clean up), then run it
+    // again: it resumes from its .dropcode-part file and the browser sender
+    // skips what is already on disk.
+    const size = 160 * 1024 * 1024;
+    const file = await makeFile(randomName(), size);
+    const sender = await newPage();
+    const code = await sendAndGetCode(sender, server.url, file.path);
+    const dir = await freshDir("cli-resume");
+    const name = file.path.split("/").pop();
+    const first = runCli(["receive", "-q", "-server", server.url, "-o", dir, code]);
+    const sidecar = join(dir, `${name}.dropcode-part.json`);
+    const t0 = Date.now();
+    while (!existsSync(sidecar) && Date.now() - t0 < 60_000) await new Promise((r) => setTimeout(r, 50));
+    assert(existsSync(sidecar), "checkpoint written");
+    first.proc.kill("SIGKILL");
+    await first.exited;
+    await sender.waitForSelector('#send[data-phase="reconnecting"]', { timeout: 20_000 });
+    console.log(`  receiver killed; sender: "${await sender.textContent("#send-status")}"`);
+
+    const second = runCli(["receive", "-server", server.url, "-o", dir, code]);
+    const res = await second.exited;
+    assert(res.code === 0, `second run exit ${res.code}: ${res.stderr}`);
+    assert(/resuming: \d+ of \d+ bytes/.test(res.stderr), "CLI reported resuming");
+    assert((await sha256File(res.stdout.trim())) === file.sha256, "hash matches after resume");
+    const sessions = await sender.evaluate(() => window.__sender.sessions);
+    console.log(`  sender sessions: ${JSON.stringify(sessions)}`);
+    assert(sessions.length === 2 && sessions[1].skippedChunks > 0, "second session skipped chunks on disk");
+    assert(readdirSync(dir).length === 1, `part files cleaned up: ${readdirSync(dir)}`);
+  },
+
+  async "cli-sender-resume"({ server, newPage }) {
+    // CLI sender, browser receiver whose peer connection dies mid-transfer.
+    const size = 64 * 1024 * 1024;
+    const file = await makeFile(randomName(), size);
+    const cli = runCli(["send", "-q", "-server", server.url, file.path]);
+    const code = await cli.firstLine;
+    const receiver = await newPage();
+    const dl = receiver.waitForEvent("download", { timeout: 120_000 });
+    dl.catch(() => {});
+    await startReceive(receiver, server.url, code);
+    await waitPercent(receiver, "#receive-stats", 30);
+    await receiver.evaluate(() => window.__receiver.link.dc.close());
+    await receiver.waitForSelector('#receive[data-phase="reconnecting"]', { timeout: 15_000 });
+    const out = join(tmp, "received-cli-resume.bin");
+    await (await dl).saveAs(out);
+    assert((await sha256File(out)) === file.sha256, "hash matches after resume");
+    const res = await cli.exited;
+    assert(res.code === 0, `cli exit ${res.code}: ${res.stderr}`);
   },
 
   async burn({ server, newPage }) {

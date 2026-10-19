@@ -49,6 +49,12 @@ async function macKey(K: Uint8Array, role: Role): Promise<CryptoKey> {
   );
 }
 
+/** HMAC-SHA256(k_role, T). Exported for test vectors. */
+export async function confirmationMac(key: CryptoKey | Uint8Array, T: Uint8Array, role?: Role): Promise<Uint8Array> {
+  const k = key instanceof Uint8Array ? await macKey(key, role!) : key;
+  return new Uint8Array(await crypto.subtle.sign("HMAC", k, T as BufferSource));
+}
+
 export const b64 = (u: Uint8Array) => btoa(String.fromCharCode(...u));
 export const unb64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
@@ -102,7 +108,7 @@ async function handshake(opts: { role: Role; code: string; localSdp: string; rem
   const mine = await macKey(K, role);
   const theirs = await macKey(K, role === "sender" ? "receiver" : "sender");
   K.fill(0);
-  const myMac = new Uint8Array(await crypto.subtle.sign("HMAC", mine, T as BufferSource));
+  const myMac = await confirmationMac(mine, T);
   channel.send({ t: "confirm", mac: b64(myMac) });
   const { mac } = await channel.recv("confirm");
   let peerMac: Uint8Array;
