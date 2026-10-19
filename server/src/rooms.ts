@@ -21,6 +21,10 @@ export interface RoomOptions {
   failedJoinWindowMs: number;
   maxRooms: number;
   maxRoomsPerIp: number;
+  /** Failed SPAKE2 confirmations before the room is burned. */
+  maxAuthFailures: number;
+  /** A receiver that has not authenticated within this time is kicked (counts as a failure). */
+  authTimeoutMs: number;
 }
 
 export const DEFAULT_ROOM_OPTIONS: RoomOptions = {
@@ -31,6 +35,8 @@ export const DEFAULT_ROOM_OPTIONS: RoomOptions = {
   failedJoinWindowMs: 60_000,
   maxRooms: 10_000,
   maxRoomsPerIp: 10,
+  maxAuthFailures: 3,
+  authTimeoutMs: 60_000,
 };
 
 type Role = "sender" | "receiver";
@@ -45,6 +51,14 @@ interface Room {
   createdAt: number;
   idleTimer: NodeJS.Timeout | null;
   lifetimeTimer: NodeJS.Timeout;
+  authTimer: NodeJS.Timeout | null;
+  receiverAuthed: boolean;
+  authFailures: number;
+  /**
+   * An unauthenticated receiver that disconnected recently. The sender's
+   * auth_failed report can race with the receiver hanging up; it still counts.
+   */
+  departed: { ip: string; until: number } | null;
 }
 
 export type Result<T = void> = { ok: true; value: T } | { ok: false; code: ErrorCode };
@@ -100,6 +114,10 @@ export class RoomManager {
       createdAt: Date.now(),
       idleTimer: null,
       lifetimeTimer: setTimeout(() => this.expire(room), this.opts.maxLifetimeMs),
+      authTimer: null,
+      receiverAuthed: false,
+      authFailures: 0,
+      departed: null,
     };
     room.lifetimeTimer.unref?.();
     this.rooms.set(nameplate, room);
@@ -121,11 +139,71 @@ export class RoomManager {
       return fail(code);
     }
 
-    room!.receiver = peer;
-    this.membership.set(peer, { room: room!, role: "receiver" });
-    this.disarmIdle(room!);
-    room!.sender!.send({ t: "peer_joined" });
+    const r = room!;
+    r.receiver = peer;
+    r.receiverAuthed = false;
+    this.membership.set(peer, { room: r, role: "receiver" });
+    this.disarmIdle(r);
+    r.authTimer = setTimeout(() => this.rejectReceiver(r, "auth_timeout"), this.opts.authTimeoutMs);
+    r.authTimer.unref?.();
+    r.sender!.send({ t: "peer_joined" });
     return ok(undefined);
+  }
+
+  /** Sender reports that the current receiver completed SPAKE2 key confirmation. */
+  authed(peer: Peer): Result {
+    const m = this.membership.get(peer);
+    if (!m || m.role !== "sender" || !m.room.receiver) return fail("bad_state");
+    m.room.receiverAuthed = true;
+    this.clearAuthTimer(m.room);
+    return ok(undefined);
+  }
+
+  /**
+   * Sender reports that the current receiver failed key confirmation (wrong
+   * code, or a MITM). The receiver is kicked; after maxAuthFailures the room
+   * is burned so the code cannot be brute-forced.
+   */
+  authFailed(peer: Peer): Result {
+    const m = this.membership.get(peer);
+    if (!m || m.role !== "sender") return fail("bad_state");
+    const room = m.room;
+    if (room.receiver && !room.receiverAuthed) {
+      this.rejectReceiver(room, "auth_failed");
+      return ok(undefined);
+    }
+    if (!room.receiver && room.departed && room.departed.until > Date.now()) {
+      const ip = room.departed.ip;
+      room.departed = null;
+      this.countAuthFailure(room, ip);
+      return ok(undefined);
+    }
+    return fail("bad_state");
+  }
+
+  private rejectReceiver(room: Room, code: "auth_failed" | "auth_timeout"): void {
+    const r = room.receiver;
+    if (!r || this.rooms.get(room.nameplate) !== room) return;
+    this.clearAuthTimer(room);
+    room.receiver = null;
+    this.membership.delete(r);
+    r.send({ t: "error", code });
+    r.close();
+    if (!this.countAuthFailure(room, r.ip)) room.sender?.send({ t: "peer_left", expiresAt: this.armIdle(room) });
+  }
+
+  /** Returns true if this failure burned the room. */
+  private countAuthFailure(room: Room, ip: string): boolean {
+    this.failedJoins.record(ip);
+    room.authFailures++;
+    if (room.authFailures < this.opts.maxAuthFailures) return false;
+    this.destroy(room, "burned", "burned");
+    return true;
+  }
+
+  private clearAuthTimer(room: Room): void {
+    if (room.authTimer) clearTimeout(room.authTimer);
+    room.authTimer = null;
   }
 
   relay(peer: Peer, data: SignalData): Result {
@@ -161,8 +239,9 @@ export class RoomManager {
     if (role === "receiver") {
       if (room.receiver !== peer) return;
       room.receiver = null;
-      room.sender?.send({ t: "peer_left" });
-      this.armIdle(room);
+      this.clearAuthTimer(room);
+      room.departed = room.receiverAuthed ? null : { ip: peer.ip, until: Date.now() + 15_000 };
+      room.sender?.send({ t: "peer_left", expiresAt: this.armIdle(room) });
     } else {
       room.sender = null;
       this.destroy(room, "sender_left", "expired");
@@ -196,6 +275,7 @@ export class RoomManager {
     if (this.rooms.get(room.nameplate) !== room) return;
     this.rooms.delete(room.nameplate);
     this.disarmIdle(room);
+    this.clearAuthTimer(room);
     clearTimeout(room.lifetimeTimer);
     this.tombstones.set(room.nameplate, { reason: tomb, until: Date.now() + this.opts.tombstoneMs });
     for (const p of [room.sender, room.receiver]) {

@@ -1,0 +1,22 @@
+[package]
+name = "dropcode-pake"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Minimal C-ABI WebAssembly wrapper around RustCrypto's spake2 crate, shared by the dropcode web client and Go CLI"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+spake2 = { version = "=0.4.0", default-features = false }
+rand_chacha = { version = "=0.3.1", default-features = false }
+rand_core = { version = "=0.6.4", default-features = false }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

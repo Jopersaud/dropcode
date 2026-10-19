@@ -48,11 +48,15 @@ export class Client {
     const m = this.queue.shift();
     if (m) return Promise.resolve(m);
     return new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error("timeout waiting for message")), timeoutMs);
-      this.waiters.push((m) => {
+      const w = (m: any) => {
         clearTimeout(t);
         resolve(m);
-      });
+      };
+      const t = setTimeout(() => {
+        this.waiters = this.waiters.filter((x) => x !== w);
+        reject(new Error("timeout waiting for message"));
+      }, timeoutMs);
+      this.waiters.push(w);
     });
   }
 

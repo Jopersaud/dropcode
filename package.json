@@ -16,7 +16,9 @@
     "dev": "npm run build && npm start",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "e2e": "node e2e/run.mjs"
+    "e2e": "node e2e/run.mjs",
+    "build:pake": "sh scripts/build-pake.sh",
+    "test:pake": "cd pake && cargo test --locked --release"
   },
   "dependencies": {
     "ws": "8.22.0"

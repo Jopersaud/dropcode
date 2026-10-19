@@ -14,6 +14,7 @@ import {
   type PeerMessage,
   type Ranges,
 } from "./peer-protocol.ts";
+import { AuthError, authenticate, type AuthChannel, type Role } from "./auth.ts";
 import { PeerLink } from "./rtc.ts";
 import { Signaling, defaultSignalingUrl, type ServerMessage } from "./signaling.ts";
 import { formatCode, parseCode, randomWords } from "./words.ts";
@@ -68,6 +69,10 @@ export interface Callbacks {
   onMeta?(meta: FileMeta): void;
   onHashProgress?(done: number, total: number): void;
   onComplete?(result: { blob: Blob; name: string }): void;
+  /** Sender only: someone connected with a wrong code (or a MITM was detected). */
+  onAuthFailure?(attempt: number, max: number): void;
+  /** Sender only: a receiver could not establish a peer connection; still waiting. */
+  onPeerUnreachable?(): void;
 }
 
 export interface Options {
@@ -235,6 +240,27 @@ abstract class Transfer {
     return rd;
   }
 
+  /** SPAKE2 + fingerprint-bound key confirmation over this data channel. */
+  protected async authenticate(link: PeerLink, dc: RTCDataChannel, rd: ChannelReader, role: Role, code: string) {
+    this.setPhase("authenticating");
+    const channel: AuthChannel = {
+      send: (m) => send(dc, m),
+      recv: async (t) => (await rd.expect(t)) as never,
+    };
+    try {
+      await authenticate({
+        role,
+        code,
+        localSdp: link.pc.localDescription!.sdp,
+        remoteSdp: link.pc.remoteDescription!.sdp,
+        channel,
+      });
+    } catch (e) {
+      if (e instanceof TransferError && e.code === "cancelled_by_peer") throw e;
+      throw new TransferError("auth_failed", e instanceof AuthError ? e.message : String(e));
+    }
+  }
+
   /** Run one data-channel session, mapping any error to a terminal state. */
   protected async runGuarded(link: PeerLink, fn: () => Promise<void>) {
     try {
@@ -266,6 +292,7 @@ export class Sender extends Transfer {
   private words = randomWords();
   private code = "";
   private meta: Promise<FileMeta>;
+  private authFailures = 0;
   /** Exposed for tests: chunks actually put on the wire across all sessions. */
   chunksSent = 0;
 
@@ -308,6 +335,7 @@ export class Sender extends Transfer {
         break;
       }
       case "peer_left":
+        this.cb.onCode?.(this.code, m.expiresAt);
         if (this.link) this.onLinkFailed("peer left");
         break;
       case "signal":
@@ -327,6 +355,14 @@ export class Sender extends Transfer {
     send(dc, { t: "hello", v: PROTOCOL_VERSION });
     const hello = await rd.expect("hello");
     if (hello.v !== PROTOCOL_VERSION) throw new TransferError("protocol", "version mismatch");
+
+    try {
+      await this.authenticate(link, dc, rd, "sender", this.code);
+    } catch (e) {
+      if (e instanceof TransferError && e.code === "auth_failed") return this.rejectPeer(link);
+      throw e;
+    }
+    this.sig.send({ t: "authed" });
 
     const meta = await this.meta;
     send(dc, { t: "meta", ...meta });
@@ -348,6 +384,34 @@ export class Sender extends Transfer {
     } else if (res.t === "hash_mismatch") throw new TransferError("hash_mismatch");
     else if (res.t === "cancel") throw new TransferError("cancelled_by_peer");
     else throw new TransferError("protocol", `unexpected ${res.t}`);
+  }
+
+  /**
+   * The receiver failed key confirmation. Drop it, tell the server (which
+   * burns the room after 3 failures) and keep waiting for the real receiver.
+   */
+  protected override onLinkFailed(reason: string) {
+    const link = this.link;
+    if (link && this.phase === "authenticating") return this.rejectPeer(link);
+    if (link && this.phase === "connecting-peer") {
+      // The receiver will see the failure itself; keep the code alive for a retry.
+      link.close();
+      this.link = null;
+      this.cb.onPeerUnreachable?.();
+      this.setPhase("waiting");
+      return;
+    }
+    super.onLinkFailed(reason);
+  }
+
+  private rejectPeer(link: PeerLink) {
+    if (this.link !== link || this.finished) return;
+    link.close();
+    this.link = null;
+    this.authFailures++;
+    this.sig.send({ t: "auth_failed" });
+    this.cb.onAuthFailure?.(this.authFailures, 3);
+    this.setPhase("waiting");
   }
 
   private async stream(link: PeerLink, dc: RTCDataChannel, meta: FileMeta, ranges: Ranges) {
@@ -459,6 +523,8 @@ export class Receiver extends Transfer {
     send(dc, { t: "hello", v: PROTOCOL_VERSION });
     const hello = await rd.expect("hello");
     if (hello.v !== PROTOCOL_VERSION) throw new TransferError("protocol", "version mismatch");
+
+    await this.authenticate(_link, dc, rd, "receiver", this.parsed!.code);
 
     const meta = await rd.expect("meta");
     const { t: _t, ...fm } = meta;

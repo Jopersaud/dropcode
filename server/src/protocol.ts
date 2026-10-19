@@ -49,7 +49,7 @@ export type ServerMessage =
   | { t: "reclaimed"; receiverPresent: boolean }
   | { t: "joined" }
   | { t: "peer_joined" }
-  | { t: "peer_left" }
+  | { t: "peer_left"; expiresAt: number }
   | { t: "signal"; data: SignalData }
   | { t: "closed"; reason: CloseReason }
   | { t: "error"; code: ErrorCode }

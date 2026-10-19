@@ -109,6 +109,13 @@ export function createSignaling(cfg: ServerConfig, opts: SignalingOptions = {}) 
         case "cancel":
           res = rooms.cancel(peer);
           break;
+        case "authed":
+          res = rooms.authed(peer);
+          break;
+        case "auth_failed":
+          res = rooms.authFailed(peer);
+          if (res.ok) log("auth_failed", { rooms: rooms.roomCount });
+          break;
         default:
           res = { ok: false as const, code: "bad_state" as const };
       }

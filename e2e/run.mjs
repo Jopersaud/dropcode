@@ -1,5 +1,6 @@
 // End-to-end scenarios. Usage: node e2e/run.mjs [scenario ...]
 import { join } from "node:path";
+import { mitmPageScript, startEvilServer } from "./evil-server.mjs";
 import { assert, launch, makeFile, randomName, sha256File, startServer, tmp } from "./lib.mjs";
 
 const SIZE = Number(process.env.E2E_SIZE ?? 50 * 1024 * 1024);
@@ -18,11 +19,21 @@ async function startReceive(page, url, code) {
 }
 
 const waitPercent = (page, sel, min) =>
-  page.waitForFunction(
-    ([sel, min]) => Number(document.querySelector(sel)?.dataset.percent ?? 0) >= min,
-    [sel, min],
-    { timeout: 60_000, polling: 50 },
-  );
+  page
+    .waitForFunction(
+      ([sel, min]) => Number(document.querySelector(sel)?.dataset.percent ?? 0) >= min,
+      [sel, min],
+      { timeout: 60_000, polling: 50 },
+    )
+    .catch(async (e) => {
+      const state = await page.evaluate(() =>
+        ["send", "receive"].map((id) => {
+          const el = document.getElementById(id);
+          return `${id}: phase=${el.dataset.phase} error=${el.dataset.error ?? ""} status="${document.getElementById(id + "-status").textContent}"`;
+        }),
+      );
+      throw new Error(`${e.message}\n  page state: ${state.join("; ")}`);
+    });
 
 /** Start a transfer of a fresh random file and return both pages once bytes are flowing. */
 async function midTransfer({ server, newPage }, size = 100 * 1024 * 1024, senderInit) {
@@ -36,6 +47,17 @@ async function midTransfer({ server, newPage }, size = 100 * 1024 * 1024, sender
   return { file, sender, receiver, code };
 }
 
+/** Wait until a card shows an error, then check it is the expected one. */
+async function expectError(page, card, code, timeout = 20_000) {
+  await page.waitForSelector(`#${card}[data-error]`, { timeout }).catch(async (e) => {
+    throw new Error(`no error on #${card} (phase=${await page.getAttribute(`#${card}`, "data-phase")}): ${e.message}`);
+  });
+  const got = await page.getAttribute(`#${card}`, "data-error");
+  assert(got === code, `#${card} error: expected ${code}, got ${got}`);
+}
+
+const wrongCode = (code) => code.replace(/-[a-z]+$/, code.endsWith("-abandon") ? "-zoo" : "-abandon");
+
 const scenarios = {
   async basic({ server, newPage }) {
     const file = await makeFile(randomName(), SIZE);
@@ -45,6 +67,7 @@ const scenarios = {
     assert(/^[1-9]\d*-[a-z]+-[a-z]+$/.test(code), `code format: ${code}`);
     const t0 = Date.now();
     const dl = receiver.waitForEvent("download", { timeout: 120_000 });
+    dl.catch(() => {});
     await startReceive(receiver, server.url, code);
     // Progress UI shows percent, speed and ETA while bytes flow.
     await waitPercent(receiver, "#receive-stats", 20);
@@ -67,7 +90,7 @@ const scenarios = {
     // The code is single-use.
     const late = await newPage();
     await startReceive(late, server.url, code);
-    await late.waitForSelector('#receive[data-error="used"]', { timeout: 10_000 });
+    await expectError(late, "receive", "used", 10_000);
     console.log("  reusing the code fails with 'used'");
   },
 
@@ -102,12 +125,12 @@ const scenarios = {
   async errors({ server, newPage }) {
     const p = await newPage();
     await startReceive(p, server.url, "not a code");
-    await p.waitForSelector('#receive[data-error="bad_code"]');
+    await expectError(p, "receive", "bad_code");
     console.log(`  bad code: "${await p.textContent("#receive-error")}"`);
     await p.click("#receive-reset");
     await p.fill("#receive-code", "987654-apple-river");
     await p.click("#receive-btn");
-    await p.waitForSelector('#receive[data-error="not_found"]');
+    await expectError(p, "receive", "not_found");
     console.log(`  unknown code: "${await p.textContent("#receive-error")}"`);
   },
 
@@ -117,10 +140,10 @@ const scenarios = {
       const file = await makeFile(randomName(), 1024);
       const sender = await newPage();
       const code = await sendAndGetCode(sender, short.url, file.path);
-      await sender.waitForSelector('#send[data-error="expired"]', { timeout: 5000 });
+      await expectError(sender, "send", "expired", 5000);
       const r = await newPage();
       await startReceive(r, short.url, code);
-      await r.waitForSelector('#receive[data-error="expired"]');
+      await expectError(r, "receive", "expired");
       console.log(`  expired: "${await r.textContent("#receive-error")}"`);
     } finally {
       short.stop();
@@ -131,20 +154,20 @@ const scenarios = {
     const { sender, receiver } = await midTransfer(ctx);
     await sender.click("#send-cancel");
     await sender.waitForSelector('#send[data-phase="cancelled"]');
-    await receiver.waitForSelector('#receive[data-error="cancelled_by_peer"]', { timeout: 10_000 });
+    await expectError(receiver, "receive", "cancelled_by_peer", 10_000);
   },
 
   async "receiver-cancel"(ctx) {
     const { sender, receiver } = await midTransfer(ctx);
     await receiver.click("#receive-cancel");
     await receiver.waitForSelector('#receive[data-phase="cancelled"]');
-    await sender.waitForSelector('#send[data-error="cancelled_by_peer"]', { timeout: 10_000 });
+    await expectError(sender, "send", "cancelled_by_peer", 10_000);
   },
 
   async "peer-disconnect"(ctx) {
     const { sender, receiver } = await midTransfer(ctx);
     await receiver.context().close();
-    await sender.waitForSelector('#send[data-error="peer_disconnected"]', { timeout: 20_000 });
+    await expectError(sender, "send", "peer_disconnected", 20_000);
     console.log(`  sender sees: "${await sender.textContent("#send-error")}"`);
   },
 
@@ -166,39 +189,127 @@ const scenarios = {
     const { sender, receiver } = await midTransfer(ctx, 8 * 1024 * 1024, corrupt).catch(async (e) => {
       throw e;
     });
-    await receiver.waitForSelector('#receive[data-error="hash_mismatch"]', { timeout: 20_000 });
-    await sender.waitForSelector('#send[data-error="hash_mismatch"]', { timeout: 10_000 });
+    await expectError(receiver, "receive", "hash_mismatch", 20_000);
+    await expectError(sender, "send", "hash_mismatch", 10_000);
     assert(!(await receiver.getAttribute("#download-link", "href")), "no download offered");
+  },
+
+  async "wrong-code"({ server, newPage }) {
+    const file = await makeFile(randomName(), 2 * 1024 * 1024);
+    const sender = await newPage();
+    const code = await sendAndGetCode(sender, server.url, file.path);
+    const bad = await newPage();
+    await startReceive(bad, server.url, wrongCode(code));
+    await expectError(bad, "receive", "auth_failed", 20_000);
+    await sender.waitForSelector("#send-notice:not([hidden])");
+    console.log(`  wrong code -> receiver: "${await bad.textContent("#receive-error")}"`);
+    console.log(`  sender notice: "${await sender.textContent("#send-notice")}"`);
+    const ph = await sender.getAttribute("#send", "data-phase");
+    assert(ph === "waiting", `sender still waiting (phase=${ph}, error=${await sender.getAttribute("#send", "data-error")} ${await sender.textContent("#send-error")})`);
+    assert((await bad.textContent("body")).indexOf(file.path.split("/").pop()) < 0, "file name not revealed");
+
+    const good = await newPage();
+    const dl = good.waitForEvent("download");
+    await startReceive(good, server.url, code);
+    const out = join(tmp, "received-after-wrong.bin");
+    await (await dl).saveAs(out);
+    assert((await sha256File(out)) === file.sha256, "hash matches after a failed attempt");
+  },
+
+  async mitm({ newPage }) {
+    // Control experiment: the same hostile server relaying honestly works.
+    const honest = await startEvilServer("honest");
+    try {
+      const file = await makeFile(randomName(), 1024 * 1024);
+      const s = await newPage();
+      const r = await newPage();
+      const code = await sendAndGetCode(s, honest.url, file.path);
+      const dl = r.waitForEvent("download");
+      await startReceive(r, honest.url, code);
+      const out = join(tmp, "received-honest.bin");
+      await (await dl).saveAs(out);
+      assert((await sha256File(out)) === file.sha256, "honest relay transfer works");
+      console.log("  control: transfer through the honest relay succeeded");
+    } finally {
+      honest.stop();
+    }
+
+    const evil = await startEvilServer("mitm");
+    try {
+      const file = await makeFile(randomName(), 1024 * 1024);
+      const mitm = await newPage();
+      await mitm.goto(evil.url + "/nothing-here");
+      await mitm.evaluate(mitmPageScript);
+      const sender = await newPage();
+      const receiver = await newPage();
+      // The attacker controls signaling but not the code: victims use the right one.
+      const code = await sendAndGetCode(sender, evil.url, file.path);
+      await startReceive(receiver, evil.url, code);
+      await expectError(receiver, "receive", "auth_failed");
+      await sender.waitForSelector("#send-notice:not([hidden])", { timeout: 20_000 });
+      const seen = await mitm.evaluate(() => window.__seen);
+      console.log(`  MITM relayed: ${[...new Set(seen)].join(", ")}`);
+      assert(seen.includes("S->R:pake") && seen.includes("R->S:pake"), "MITM really sat in the data path");
+      assert(!seen.some((t) => /meta|binary/.test(t)), "no metadata or file data passed the MITM");
+      assert(evil.state.senderReports.includes("auth_failed"), "sender reported the failure");
+      assert(!(await receiver.textContent("body")).includes(file.path.split("/").pop()), "file name not leaked");
+      console.log("  both victims rejected the connection; no file data or name leaked");
+    } finally {
+      evil.stop();
+    }
+  },
+
+  async burn({ server, newPage }) {
+    const file = await makeFile(randomName(), 1024);
+    const sender = await newPage();
+    const code = await sendAndGetCode(sender, server.url, file.path);
+    for (let i = 0; i < 3; i++) {
+      const bad = await newPage();
+      await startReceive(bad, server.url, wrongCode(code));
+      await expectError(bad, "receive", "auth_failed", 20_000);
+      await bad.context().close();
+    }
+    await expectError(sender, "send", "burned", 10_000);
+    const good = await newPage();
+    await startReceive(good, server.url, code);
+    await expectError(good, "receive", "burned");
+    console.log(`  after 3 failures: "${await good.textContent("#receive-error")}"`);
   },
 };
 
 const wanted = process.argv.slice(2);
 const names = wanted.length ? wanted : Object.keys(scenarios);
-const server = await startServer();
 const { browser, newPage } = await launch();
+const logs = [];
 let failed = 0;
 try {
   for (const name of names) {
     const fn = scenarios[name];
     if (!fn) throw new Error(`unknown scenario ${name}`);
     process.stdout.write(`- ${name}\n`);
+    // A fresh server per scenario: all browsers share 127.0.0.1, so per-IP rate
+    // limits would otherwise leak between scenarios.
+    const server = await startServer();
     try {
       await fn({ server, newPage });
       console.log(`  PASS`);
     } catch (e) {
       failed++;
       console.log(`  FAIL: ${e.stack ?? e}`);
+    } finally {
+      server.stop();
+      logs.push(...server.logs);
     }
   }
 } finally {
   await browser.close();
-  server.stop();
 }
 // Server logs must never contain codes or file names.
-const leaked = server.logs.filter((l) => /e2e-[0-9a-f]{8}|-[a-z]+-[a-z]+/.test(l));
+const leaked = logs.filter((l) => /e2e-[0-9a-f]{8}|-[a-z]+-[a-z]+|dropped\.bin/.test(l));
 if (leaked.length) {
   failed++;
   console.log("FAIL: sensitive data in server logs:", leaked);
 }
+console.log(`server log lines checked for leaks: ${logs.length}`);
 console.log(failed ? `${failed} failed` : "all passed");
 process.exit(failed ? 1 : 0);

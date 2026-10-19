@@ -87,7 +87,7 @@ describe("room lifecycle", () => {
     await r1.next();
     await sender.next();
     r1.close();
-    expect(await sender.next()).toEqual({ t: "peer_left" });
+    expect(await sender.next()).toMatchObject({ t: "peer_left" });
 
     const r2 = await connect("10.0.0.3");
     r2.send({ t: "join", nameplate });
@@ -160,6 +160,96 @@ describe("one sender, one receiver", () => {
   });
 });
 
+describe("authentication failures", () => {
+  async function paired(connect: (ip?: string) => Promise<Client>, ip = "10.0.0.2") {
+    const sender = await connect("10.0.0.1");
+    const nameplate = await createRoom(sender);
+    const r = await connect(ip);
+    r.send({ t: "join", nameplate });
+    expect(await r.next()).toEqual({ t: "joined" });
+    expect(await sender.next()).toEqual({ t: "peer_joined" });
+    return { sender, nameplate, r };
+  }
+
+  it("kicks the receiver on auth_failed and lets another receiver try", async () => {
+    const { connect } = await setup();
+    const { sender, nameplate, r } = await paired(connect);
+    sender.send({ t: "auth_failed" });
+    expect(await r.next()).toEqual({ t: "error", code: "auth_failed" });
+    expect(await r.closed).toBe(1000);
+    expect(await sender.next()).toMatchObject({ t: "peer_left", expiresAt: expect.any(Number) });
+    const r2 = await connect("10.0.0.3");
+    r2.send({ t: "join", nameplate });
+    expect(await r2.next()).toEqual({ t: "joined" });
+  });
+
+  it("burns the room after 3 failed confirmations", async () => {
+    const { connect } = await setup();
+    const sender = await connect("10.0.0.1");
+    const nameplate = await createRoom(sender);
+    for (let i = 0; i < 3; i++) {
+      const r = await connect(`10.0.1.${i}`);
+      r.send({ t: "join", nameplate });
+      expect(await r.next()).toEqual({ t: "joined" });
+      expect(await sender.next()).toEqual({ t: "peer_joined" });
+      sender.send({ t: "auth_failed" });
+      expect(await r.next()).toEqual({ t: "error", code: "auth_failed" });
+      if (i < 2) expect(await sender.next()).toMatchObject({ t: "peer_left" });
+    }
+    expect(await sender.next()).toEqual({ t: "closed", reason: "burned" });
+    const late = await connect("10.0.2.1");
+    late.send({ t: "join", nameplate });
+    expect(await late.next()).toEqual({ t: "error", code: "burned" });
+  });
+
+  it("still counts a failure reported just after the receiver hung up", async () => {
+    const { connect } = await setup({ rooms: { maxAuthFailures: 1 } });
+    const { sender, r } = await paired(connect);
+    r.close();
+    expect(await sender.next()).toMatchObject({ t: "peer_left" });
+    sender.send({ t: "auth_failed" });
+    expect(await sender.next()).toEqual({ t: "closed", reason: "burned" });
+  });
+
+  it("does not count a departed receiver twice", async () => {
+    const { connect } = await setup();
+    const { sender, r } = await paired(connect);
+    r.close();
+    expect(await sender.next()).toMatchObject({ t: "peer_left" });
+    sender.send({ t: "auth_failed" });
+    expect(await sender.silent()).toBe(true);
+    sender.send({ t: "auth_failed" });
+    expect(await sender.next()).toEqual({ t: "error", code: "bad_state" });
+  });
+
+  it("counts a failed confirmation against the receiver's IP", async () => {
+    const { connect } = await setup({ rooms: { failedJoinLimit: 1 } });
+    const { sender } = await paired(connect, "10.6.6.8");
+    sender.send({ t: "auth_failed" });
+    const again = await connect("10.6.6.8");
+    again.send({ t: "join", nameplate: "1" });
+    expect(await again.next()).toEqual({ t: "error", code: "rate_limited" });
+  });
+
+  it("does not let a receiver report failures or a sender fail an authenticated peer", async () => {
+    const { connect } = await setup();
+    const { sender, r } = await paired(connect);
+    r.send({ t: "auth_failed" });
+    expect(await r.next()).toEqual({ t: "error", code: "bad_state" });
+    sender.send({ t: "authed" });
+    sender.send({ t: "auth_failed" });
+    expect(await sender.next()).toEqual({ t: "error", code: "bad_state" });
+    expect(await r.silent()).toBe(true);
+  });
+
+  it("kicks a receiver that never authenticates", async () => {
+    const { connect } = await setup({ rooms: { authTimeoutMs: 150 } });
+    const { sender, r } = await paired(connect);
+    expect(await r.next(1000)).toEqual({ t: "error", code: "auth_timeout" });
+    expect(await sender.next()).toMatchObject({ t: "peer_left" });
+  });
+});
+
 describe("TTL", () => {
   it("expires an unclaimed room", async () => {
     const { connect } = await setup({ rooms: { ttlMs: 150 } });
@@ -182,7 +272,7 @@ describe("TTL", () => {
     await sleep(300);
     expect(servers[0]!.app.signaling.rooms.hasRoom(nameplate)).toBe(true);
     r.close();
-    expect(await sender.next()).toEqual({ t: "peer_left" });
+    expect(await sender.next()).toMatchObject({ t: "peer_left" });
     expect(await sender.next(1000)).toEqual({ t: "closed", reason: "expired" });
   });
 

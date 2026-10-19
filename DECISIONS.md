@@ -95,3 +95,59 @@ npm 10 arborist crash on vitest's optional peer dependencies.
 - **Testing corruption** without a production test hook: the e2e test monkeypatches
   `RTCDataChannel.prototype.send` in the sender page to flip one byte in flight.
 - `ROOM_TTL_MS` env var overrides the TTL (used by the expiry e2e test).
+
+## Phase 3: SPAKE2 authentication bound to DTLS fingerprints
+
+**Library: RustCrypto `spake2` 0.4.0** (Ed25519 group, constant-time
+`curve25519-dalek`, the implementation magic-wormhole's Rust ecosystem uses), compiled to
+WebAssembly behind a 100-line C ABI (`pake/src/lib.rs`). Alternatives considered:
+- JS SPAKE2 packages on npm (`spake2`, `@niomon/spake2`) are unaudited, unmaintained since
+  2022 and built on `elliptic`/`bn.js` big-number code.
+- Go's `gospake2` (used by wormhole-william) does scalar arithmetic with `math/big`, which
+  is not constant time, and has had no release since 2021.
+Using one WASM binary everywhere means the browser and the Go CLI (Phase 5, via the
+pure-Go `wazero` runtime) run *byte-identical* PAKE code, so interop is guaranteed rather
+than hoped for. The module imports nothing from the host; the host passes a 32-byte seed
+from its CSPRNG (`crypto.getRandomValues` / `crypto/rand`) for a ChaCha20 RNG. The built
+`shared/pake.wasm` (60 KB) is committed so building the web client or CLI needs no Rust;
+`npm run build:pake` rebuilds it with a pinned toolchain (`pake/rust-toolchain.toml`) and
+`Cargo.lock`.
+
+**Protocol** (`web/src/auth.ts`), run over the data channel right after it opens, before
+any file metadata is sent:
+1. Both send `{t:"pake", msg}`: SPAKE2 with password = the full canonical code
+   (`4-apple-river`), idA = `dropcode-sender`, idB = `dropcode-receiver`. Asymmetric roles
+   (sender = A) so a message reflected back at its author is rejected.
+2. Each side computes K, then the transcript
+   `T = "dropcode-v1 confirm\n" + fp(sender) + "\n" + fp(receiver)`, where `fp(x)` is the
+   canonical set of `a=fingerprint` lines in x's SDP: each side's own fingerprint from its
+   local description and the peer's from the remote description the browser actually
+   enforces for DTLS.
+3. `k_role = HKDF-SHA256(K, salt="", info="dropcode-v1 confirm <role>")`, each side sends
+   `{t:"confirm", mac: HMAC-SHA256(k_role, T)}` and verifies the peer's with WebCrypto
+   `verify` (constant time). Separate per-role keys prevent reflecting a MAC.
+4. Any failure (or a 20 s timeout) aborts. Only after verifying does the sender send
+   `meta`, so a wrong-code receiver never even learns the file name or size.
+
+Why this stops a malicious signaling server: to read the traffic it must terminate DTLS
+with each victim using its own certificates, which means substituting the fingerprints in
+the SDP it relays. Then the sender sees (fpS, fpM1) and the receiver sees (fpM2, fpR), so
+their transcripts differ and the MACs cannot verify unless the attacker knows K, which
+requires knowing the code. The server never sees the words, and each guess costs one
+online attempt. `e2e/evil-server.mjs` exercises exactly this attack with a real third
+browser relaying the data channel, and it is detected.
+
+**Failure accounting.** Only the sender reports failures (`auth_failed` to the server);
+the receiver may be the attacker, so its own reports would be meaningless. The server then
+kicks the receiver, counts the failure against the receiver's IP (same 5/minute limit as
+failed joins) and burns the room after 3 failures. If the receiver hangs up before the
+sender's report arrives, the report still counts within a 15 s window, so an attacker
+can't dodge the counter by disconnecting quickly (this race showed up in e2e testing). A
+receiver that does not authenticate within 60 s is kicked and counted. After a failed
+attempt the sender keeps the code alive and shows a notice ("1 of 3 attempts"), because a
+wrong guess by someone else shouldn't kill the legitimate transfer.
+
+**Not done on purpose:** the code is not used as an encryption key and there is no
+application-layer encryption. Confidentiality and integrity come from DTLS (WebRTC
+mandates it). SPAKE2 is only used to authenticate the DTLS endpoints, which is the piece
+WebRTC leaves to the signaling channel.

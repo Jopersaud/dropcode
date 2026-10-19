@@ -109,6 +109,7 @@ let expiryTimer = 0;
 function startSend(file: File) {
   if (sender) return;
   sendPanel.reset();
+  $("send-notice").hidden = true;
   $("send-name").textContent = file.name;
   $("send-size").textContent = formatBytes(file.size);
   $("send-code").textContent = "";
@@ -135,6 +136,13 @@ function startSend(file: File) {
         d < t ? `Waiting for the receiver… (preparing file: ${Math.floor(percent(d, t))}%)` : "Waiting for the receiver…";
     },
     onProgress: (d, t) => sendPanel.progress(d, t),
+    onAuthFailure: (n, max) =>
+      notice(
+        `Someone connected with the wrong code and was rejected (${n} of ${max} attempts; ` +
+          `the code is disabled after ${max}). Still waiting for the real receiver.`,
+      ),
+    onPeerUnreachable: () =>
+      notice("A receiver tried to connect but no direct connection could be made. Still waiting."),
     onError: (e) =>
       sendPanel.error(e, e.code === "expired" ? "This code expired before anyone used it. Start again for a new one." : undefined),
   });
@@ -142,6 +150,12 @@ function startSend(file: File) {
   $("copy-link").onclick = () => copy(`${location.origin}/#${code}`, $("copy-link"));
   (window as unknown as { __sender: Sender }).__sender = sender;
   sender.start();
+}
+
+function notice(text: string) {
+  const el = $("send-notice");
+  el.textContent = text;
+  el.hidden = false;
 }
 
 async function copy(text: string, btn: HTMLElement) {

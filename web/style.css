@@ -1,11 +1,11 @@
 :root {
   --bg: #f5f6f8; --card: #fff; --fg: #1b2130; --muted: #5d6677; --line: #dfe3ea;
-  --accent: #2f6fed; --accent-fg: #fff; --danger: #c43b3b; --ok: #1f8a4c; --drop: #eef3ff;
+  --accent: #2f6fed; --accent-fg: #fff; --danger: #c43b3b; --ok: #1f8a4c; --drop: #eef3ff; --warn: #9a5b00;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #12151b; --card: #1b2029; --fg: #e8ebf1; --muted: #9aa3b4; --line: #2c3340;
-    --accent: #6b9bff; --accent-fg: #0d1220; --danger: #ff7b7b; --ok: #5fd08f; --drop: #1d2740;
+    --accent: #6b9bff; --accent-fg: #0d1220; --danger: #ff7b7b; --ok: #5fd08f; --drop: #1d2740; --warn: #f0b45a;
   }
 }
 * { box-sizing: border-box; }
@@ -40,6 +40,7 @@ button:disabled { opacity: .5; cursor: default; }
 [data-phase=done] .bar span { background: var(--ok); }
 .stats { font-variant-numeric: tabular-nums; margin: 6px 0 0; font-size: .9rem; }
 .status { margin: 8px 0; }
+.notice { color: var(--warn); margin: 8px 0; }
 .error { color: var(--danger); font-weight: 600; margin: 8px 0; }
 [data-phase=done] .status { color: var(--ok); font-weight: 600; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
