@@ -151,3 +151,42 @@ wrong guess by someone else shouldn't kill the legitimate transfer.
 application-layer encryption. Confidentiality and integrity come from DTLS (WebRTC
 mandates it). SPAKE2 is only used to authenticate the DTLS endpoints, which is the piece
 WebRTC leaves to the signaling channel.
+
+## Phase 4: resume
+
+**What "reconnect" means.** Once the peers have authenticated, a transfer survives:
+- *the peer connection dying* (ICE failure, a network switch, the data channel closing):
+  the receiver re-joins the room with the same code, the sender re-offers, both
+  re-run SPAKE2 (a new DTLS session needs new confirmation), the sender re-sends `meta`,
+  the receiver checks it is the same file (size + SHA-256) and replies `resume` with the
+  chunk ranges it holds, and the sender sends only the rest;
+- *either side's signaling WebSocket dropping*: ignored while the peer link is up (the
+  server isn't needed for data). The receiver reconnects lazily if the link later fails.
+  The sender reconnects in the background with `reclaim`, using a random 144-bit token it
+  got from `create` (compared with `timingSafeEqual`; a wrong token counts as a failed
+  join). The server keeps the room for 30 s after the sender's socket drops;
+- *both at once* (the sender switches networks).
+
+**Resume state** is a list of half-open chunk-index ranges (`[[0, 341], ...]`), at most
+4096 ranges, validated against the file's chunk count. The sender never trusts it beyond
+"skip these"; the final SHA-256 check covers everything.
+
+**Where the received chunks live.** The browser receiver keeps them in memory, so resume
+works across connection loss but not across a page reload (a reloaded receiver re-joins
+and gets the whole file again). The Go CLI receiver (Phase 5) writes a `.part` file
+plus a small JSON sidecar and can resume across process restarts.
+
+**Server changes.** A receiver may join while the sender is briefly away (pairing
+completes on reclaim). Every new pairing must re-authenticate within the 60 s auth
+timeout. A completed transfer is reported by both sides (`done`), whichever arrives first
+destroys the room; the other side treats `closed: done` as informational and still waits
+for its own result over the data channel.
+
+**Two races found by the e2e suite and fixed:**
+1. Chromium sometimes drops a message that reaches the *offerer's* data channel before
+   its `open` event, even with `onmessage` attached at creation. The handshake is now
+   strictly sender-first: the receiver sends nothing until it has the sender's `hello`.
+   The Go CLI follows the same rule. (Early messages are also buffered in `PeerLink`.)
+2. On a hash mismatch the receiver used to tell the server `cancel`, which could reach
+   the sender before the receiver's own `hash_mismatch` data-channel message. Now only
+   the sender spends the code in that case.

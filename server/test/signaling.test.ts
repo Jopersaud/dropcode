@@ -95,15 +95,19 @@ describe("room lifecycle", () => {
     expect(await sender.next()).toEqual({ t: "peer_joined" });
   });
 
-  it("destroys the room when the sender disconnects", async () => {
-    const { connect } = await setup();
+  it("destroys the room when the sender does not come back within the grace period", async () => {
+    const { connect } = await setup({ rooms: { senderGraceMs: 150 } });
     const sender = await connect();
     const receiver = await connect("10.0.0.2");
     const nameplate = await createRoom(sender);
     receiver.send({ t: "join", nameplate });
     await receiver.next();
     sender.close();
-    expect(await receiver.next()).toEqual({ t: "closed", reason: "sender_left" });
+    expect(await receiver.next()).toMatchObject({ t: "peer_left" });
+    expect(await receiver.next(1000)).toEqual({ t: "closed", reason: "sender_left" });
+    const late = await connect("10.0.0.3");
+    late.send({ t: "join", nameplate });
+    expect(await late.next()).toEqual({ t: "error", code: "expired" });
   });
 
   it("does not reuse a nameplate that is still alive", async () => {
@@ -114,6 +118,69 @@ describe("room lifecycle", () => {
       seen.add(await createRoom(c));
     }
     expect(seen.size).toBe(9);
+  });
+});
+
+describe("sender reconnect (reclaim)", () => {
+  it("lets the sender take its room back with the token", async () => {
+    const { connect } = await setup();
+    const sender = await connect("10.0.0.1");
+    sender.send({ t: "create" });
+    const { nameplate, token } = await sender.next();
+    const receiver = await connect("10.0.0.2");
+    receiver.send({ t: "join", nameplate });
+    await receiver.next();
+    await sender.next();
+    sender.close();
+    expect(await receiver.next()).toMatchObject({ t: "peer_left" });
+
+    const back = await connect("10.0.0.9"); // new network, new IP
+    back.send({ t: "reclaim", nameplate, token });
+    expect(await back.next()).toEqual({ t: "reclaimed", receiverPresent: true });
+    back.send({ t: "signal", data: { kind: "offer", sdp: "v=0 again" } });
+    expect(await receiver.next()).toEqual({ t: "signal", data: { kind: "offer", sdp: "v=0 again" } });
+  });
+
+  it("lets a receiver join while the sender is away", async () => {
+    const { connect } = await setup();
+    const sender = await connect();
+    sender.send({ t: "create" });
+    const { nameplate, token } = await sender.next();
+    sender.close();
+    await sleep(50);
+    const receiver = await connect("10.0.0.2");
+    receiver.send({ t: "join", nameplate });
+    expect(await receiver.next()).toEqual({ t: "joined" });
+    const back = await connect();
+    back.send({ t: "reclaim", nameplate, token });
+    expect(await back.next()).toEqual({ t: "reclaimed", receiverPresent: true });
+  });
+
+  it("rejects a wrong token and counts it as a failed attempt", async () => {
+    const { connect } = await setup({ rooms: { failedJoinLimit: 1 } });
+    const sender = await connect();
+    const nameplate = await createRoom(sender);
+    const thief = await connect("10.6.6.9");
+    thief.send({ t: "reclaim", nameplate, token: "A".repeat(24) });
+    expect(await thief.next()).toEqual({ t: "error", code: "not_found" });
+    const again = await connect("10.6.6.9");
+    again.send({ t: "reclaim", nameplate, token: "B".repeat(24) });
+    expect(await again.next()).toEqual({ t: "error", code: "rate_limited" });
+    expect(await sender.silent()).toBe(true);
+  });
+
+  it("replaces a lingering old sender connection", async () => {
+    const { connect } = await setup();
+    const sender = await connect();
+    sender.send({ t: "create" });
+    const { nameplate, token } = await sender.next();
+    const back = await connect();
+    back.send({ t: "reclaim", nameplate, token });
+    expect(await back.next()).toEqual({ t: "reclaimed", receiverPresent: false });
+    expect(await sender.closed).toBe(1000);
+    const receiver = await connect("10.0.0.2");
+    receiver.send({ t: "join", nameplate });
+    expect(await back.next()).toEqual({ t: "peer_joined" });
   });
 });
 

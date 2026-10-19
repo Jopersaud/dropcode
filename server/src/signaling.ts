@@ -94,6 +94,13 @@ export function createSignaling(cfg: ServerConfig, opts: SignalingOptions = {}) 
             peer.send({ t: "created", ...res.value });
           }
           break;
+        case "reclaim":
+          res = rooms.reclaim(peer, msg.nameplate, msg.token);
+          if (res.ok) {
+            log("room_reclaimed", { receiverPresent: res.value.receiverPresent });
+            peer.send({ t: "reclaimed", ...res.value });
+          }
+          break;
         case "join":
           res = rooms.join(peer, msg.nameplate);
           if (res.ok) peer.send({ t: "joined" });

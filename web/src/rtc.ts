@@ -1,4 +1,4 @@
-import type { Signaling, SignalData } from "./signaling.ts";
+import type { SignalData } from "./signaling.ts";
 
 export const BUFFER_LOW = 1 << 20;
 export const BUFFER_HIGH = 4 << 20;
@@ -8,20 +8,26 @@ const CONNECT_TIMEOUT_MS = 30_000;
  * One WebRTC connection attempt. The sender is always the offerer and
  * creates the single ordered, reliable data channel.
  */
+let nextId = 1;
+
 export class PeerLink {
+  readonly id = nextId++;
   readonly pc: RTCPeerConnection;
   dc: RTCDataChannel | null = null;
   private pending: RTCIceCandidateInit[] = [];
   private closed = false;
   private timer: number;
   private disconnectTimer: number | undefined;
+  /** Messages that arrive before a handler is attached (the peer may send before our "open" fires). */
+  private early: MessageEvent[] = [];
+  private handler: ((ev: MessageEvent) => void) | null = null;
   onopen: (dc: RTCDataChannel) => void = () => {};
   /** Fired at most once, when the link can no longer be used. */
   onfail: (reason: string) => void = () => {};
 
   constructor(
     iceServers: RTCIceServer[],
-    private readonly sig: Signaling,
+    private readonly sendSignal: (data: SignalData) => void,
     private readonly initiator: boolean,
   ) {
     this.pc = new RTCPeerConnection({ iceServers });
@@ -89,6 +95,10 @@ export class PeerLink {
     this.dc = dc;
     dc.binaryType = "arraybuffer";
     dc.bufferedAmountLowThreshold = BUFFER_LOW;
+    dc.onmessage = (ev) => {
+      if (this.handler) this.handler(ev);
+      else if (this.early.length < 64) this.early.push(ev);
+    };
     dc.onopen = () => {
       clearTimeout(this.timer);
       this.onopen(dc);
@@ -97,8 +107,14 @@ export class PeerLink {
     dc.onerror = () => this.fail("channel error");
   }
 
+  /** Route data-channel messages to `fn`, first replaying any that arrived early. */
+  setMessageHandler(fn: (ev: MessageEvent) => void): void {
+    this.handler = fn;
+    for (const ev of this.early.splice(0)) fn(ev);
+  }
+
   private signal(data: SignalData) {
-    if (!this.closed) this.sig.send({ t: "signal", data });
+    if (!this.closed) this.sendSignal(data);
   }
 
   /** Resolves once the send buffer has drained below the high-water mark. */

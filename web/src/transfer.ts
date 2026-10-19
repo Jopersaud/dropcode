@@ -2,6 +2,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import {
   CHUNK_SIZE,
+  MAX_RANGES,
   PROTOCOL_VERSION,
   bitmapToRanges,
   chunkCount,
@@ -125,15 +126,34 @@ class ChannelReader {
   }
 }
 
-const send = (dc: RTCDataChannel, m: PeerMessage) => dc.send(JSON.stringify(m));
+const send = (dc: RTCDataChannel, m: PeerMessage) => {
+  debug(`-> ${m.t} (dc ${dc.id} ${dc.readyState})`);
+  dc.send(JSON.stringify(m));
+};
+/** Diagnostics for the browser console. Never include codes, names or keys. */
+const debug = (...args: unknown[]) => console.debug("[dropcode]", ...args);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Backoff schedule for reconnecting to the signaling server (ms). */
+const BACKOFF = [250, 500, 1000, 2000, 4000, 8000];
 
-/** Shared plumbing: signaling connection, phase tracking, terminal states. */
+/**
+ * Shared plumbing: signaling connection, peer links, phase tracking, terminal
+ * states. A transfer survives losing either the signaling connection (as long
+ * as the peer link is up) or the peer link (by reconnecting through
+ * signaling and resuming), once the peers have authenticated each other.
+ */
 abstract class Transfer {
-  protected sig!: Signaling;
+  protected sig: Signaling | null = null;
   protected iceServers: RTCIceServer[] = [];
   protected link: PeerLink | null = null;
+  /** True while the current link has passed key confirmation. */
+  protected linkAuthed = false;
+  /** True once any session completed authentication: from then on, failures are resumable. */
+  protected everAuthed = false;
   protected phase: Phase = "connecting";
   protected finished = false;
+  /** The server destroyed the room after a completed transfer; don't reconnect. */
+  protected roomDone = false;
 
   constructor(
     protected readonly cb: Callbacks,
@@ -142,40 +162,59 @@ abstract class Transfer {
 
   protected setPhase(p: Phase) {
     if (this.finished) return;
+    if (p !== this.phase) debug(`${this.constructor.name}: ${this.phase} -> ${p}`);
     this.phase = p;
     this.cb.onPhase(p);
   }
 
-  protected async connectSignaling(): Promise<void> {
-    this.setPhase("connecting");
-    this.sig = new Signaling(this.opts.signalingUrl ?? defaultSignalingUrl());
-    this.sig.onmessage = (m) => this.onServer(m);
-    this.sig.onclose = () => {
-      if (!this.finished) this.fail(new TransferError("signaling_failed"));
+  /** Open a fresh signaling connection and wait for the server's hello. */
+  protected async openSignaling(): Promise<Signaling> {
+    this.sig?.close();
+    const sig = new Signaling(this.opts.signalingUrl ?? defaultSignalingUrl());
+    this.sig = sig;
+    sig.onmessage = (m) => {
+      if (this.sig === sig && !this.finished) this.onServer(m);
     };
-    const hello = await this.sig.hello.catch(() => {
+    sig.onclose = () => {
+      if (this.sig !== sig) return;
+      this.sig = null;
+      if (!this.finished && !this.roomDone) this.onSignalingLost();
+    };
+    const hello = await sig.hello.catch(() => {
       throw new TransferError("signaling_failed");
     });
     this.iceServers = hello.iceServers;
+    return sig;
+  }
+
+  protected get linkHealthy(): boolean {
+    return !!this.link && this.linkAuthed && this.link.dc?.readyState === "open";
   }
 
   protected abstract onServer(m: ServerMessage): void;
+  protected abstract onSignalingLost(): void;
 
   protected serverError(code: string) {
     this.fail(new TransferError(SERVER_ERRORS[code] ?? "protocol", code));
   }
 
   protected onClosed(reason: string) {
+    if (reason === "done") {
+      // The other side already confirmed completion to the server; our own
+      // result still comes over the data channel.
+      this.roomDone = true;
+      return;
+    }
     if (this.finished) return;
     if (reason === "cancelled") this.fail(new TransferError("cancelled_by_peer"));
     else if (reason === "expired") this.fail(new TransferError("expired"));
-    else if (reason === "sender_left") this.fail(new TransferError("peer_disconnected"));
     else if (reason === "burned") this.fail(new TransferError("burned"));
     else this.fail(new TransferError("peer_disconnected"));
   }
 
   protected fail(err: TransferError) {
     if (this.finished) return;
+    debug(`${this.constructor.name} failed: ${err.code} (${err.message})`);
     this.cb.onError(err);
     this.setPhase("failed");
     this.finished = true;
@@ -204,44 +243,58 @@ abstract class Transfer {
   }
 
   protected teardown() {
+    this.dropLink();
+    const sig = this.sig;
+    this.sig = null;
+    sig?.close();
+  }
+
+  protected dropLink() {
     this.link?.close();
     this.link = null;
-    this.sig?.close();
+    this.linkAuthed = false;
   }
 
   protected newLink(initiator: boolean): PeerLink {
-    this.link?.close();
-    const link = new PeerLink(this.iceServers, this.sig, initiator);
+    this.dropLink();
+    const link = new PeerLink(this.iceServers, (data) => this.sig?.send({ t: "signal", data }), initiator);
     this.link = link;
     this.setPhase("connecting-peer");
     link.onfail = (reason) => {
-      if (this.link !== link) return;
+      if (this.link !== link || this.finished) return;
+      debug(`${this.constructor.name}: link failed in ${this.phase}: ${reason}`);
       this.onLinkFailed(reason);
     };
     return link;
   }
 
-  protected onLinkFailed(reason: string) {
-    this.fail(new TransferError(reason === "timeout" ? "connection_failed" : "peer_disconnected", reason));
-  }
+  protected abstract onLinkFailed(reason: string): void;
 
   /** Wire a data channel to a reader; binary frames go to onBinary. */
-  protected attachReader(dc: RTCDataChannel, onBinary: (buf: ArrayBuffer) => void): ChannelReader {
+  protected attachReader(link: PeerLink, dc: RTCDataChannel, onBinary: (buf: ArrayBuffer) => void): ChannelReader {
     const rd = new ChannelReader();
-    dc.onmessage = (ev) => {
+    link.setMessageHandler((ev) => {
       if (typeof ev.data === "string") {
         const m = parsePeerMessage(ev.data);
+        debug(`${this.constructor.name} <- ${m?.t ?? "invalid"} (link ${link.id})`);
         if (!m) rd.fail(new TransferError("protocol", "malformed peer message"));
         else if (m.t === "cancel") this.fail(new TransferError("cancelled_by_peer"));
         else rd.push(m);
       } else onBinary(ev.data as ArrayBuffer);
-    };
+    });
     dc.addEventListener("close", () => rd.fail(new TransferError("peer_disconnected")));
     return rd;
   }
 
-  /** SPAKE2 + fingerprint-bound key confirmation over this data channel. */
-  protected async authenticate(link: PeerLink, dc: RTCDataChannel, rd: ChannelReader, role: Role, code: string) {
+  /** Version check, then SPAKE2 + fingerprint-bound key confirmation over this data channel. */
+  protected async handshake(link: PeerLink, dc: RTCDataChannel, rd: ChannelReader, role: Role, code: string) {
+    // The sender (offerer) speaks first; the receiver answers only after hearing
+    // it. Messages sent to the offerer before its channel has fully opened can
+    // be dropped (observed in Chromium), and the sender's hello proves it is open.
+    if (role === "sender") send(dc, { t: "hello", v: PROTOCOL_VERSION });
+    const hello = await rd.expect("hello");
+    if (role === "receiver") send(dc, { t: "hello", v: PROTOCOL_VERSION });
+    if (hello.v !== PROTOCOL_VERSION) throw new TransferError("protocol", "version mismatch");
     this.setPhase("authenticating");
     const channel: AuthChannel = {
       send: (m) => send(dc, m),
@@ -259,21 +312,35 @@ abstract class Transfer {
       if (e instanceof TransferError && e.code === "cancelled_by_peer") throw e;
       throw new TransferError("auth_failed", e instanceof AuthError ? e.message : String(e));
     }
+    if (this.link === link) {
+      this.linkAuthed = true;
+      this.everAuthed = true;
+    }
   }
 
-  /** Run one data-channel session, mapping any error to a terminal state. */
+  /** Run one data-channel session; errors end the session (and maybe the transfer). */
   protected async runGuarded(link: PeerLink, fn: () => Promise<void>) {
     try {
       await fn();
     } catch (e) {
       if (this.link !== link || this.finished) return;
       const err = e instanceof TransferError ? e : new TransferError("protocol", String(e));
+      debug(`${this.constructor.name}: session ended in ${this.phase}: ${err.code} (${err.message})`);
       if (err.code === "peer_disconnected") this.onLinkFailed("channel closed");
+      else if (err.code === "auth_failed") this.onAuthFailed(link, err);
       else {
-        if (err.code === "hash_mismatch" || err.code === "protocol") this.sig.send({ t: "cancel" });
+        // Spend the code. On a hash mismatch the sender does this after hearing
+        // from the receiver, so the receiver's server message can't overtake
+        // its own data-channel report.
+        if (err.code === "protocol" || (err.code === "hash_mismatch" && this instanceof Sender))
+          this.sig?.send({ t: "cancel" });
         this.fail(err);
       }
     }
+  }
+
+  protected onAuthFailed(_link: PeerLink, err: TransferError) {
+    this.fail(err);
   }
 }
 
@@ -291,10 +358,14 @@ export async function hashFile(file: Blob, onProgress?: (done: number, total: nu
 export class Sender extends Transfer {
   private words = randomWords();
   private code = "";
+  private nameplate = "";
+  private token = "";
   private meta: Promise<FileMeta>;
   private authFailures = 0;
-  /** Exposed for tests: chunks actually put on the wire across all sessions. */
+  private reclaiming = false;
+  /** Exposed for tests: chunks put on the wire, and what each session skipped. */
   chunksSent = 0;
+  sessions: { skippedChunks: number }[] = [];
 
   constructor(
     private readonly file: File,
@@ -313,30 +384,39 @@ export class Sender extends Transfer {
   }
 
   async start(): Promise<void> {
+    this.setPhase("connecting");
     try {
-      await this.connectSignaling();
-      this.sig.send({ t: "create" });
+      const sig = await this.openSignaling();
+      sig.send({ t: "create" });
     } catch (e) {
       this.fail(e instanceof TransferError ? e : new TransferError("signaling_failed"));
     }
   }
 
+  /** Phase to show while there is no usable peer link. */
+  private get idlePhase(): Phase {
+    return this.everAuthed ? "reconnecting" : "waiting";
+  }
+
   protected onServer(m: ServerMessage) {
     switch (m.t) {
       case "created":
+        this.nameplate = m.nameplate;
+        this.token = m.token;
         this.code = formatCode(m.nameplate, this.words);
         this.cb.onCode?.(this.code, m.expiresAt);
         this.setPhase("waiting");
         break;
-      case "peer_joined": {
-        const link = this.newLink(true);
-        link.onopen = (dc) => this.runGuarded(link, () => this.session(link, dc));
-        link.start().catch(() => this.onLinkFailed("negotiation failed"));
+      case "reclaimed":
+        if (m.receiverPresent && !this.linkHealthy) this.startLink();
         break;
-      }
+      case "peer_joined":
+        this.startLink();
+        break;
       case "peer_left":
-        this.cb.onCode?.(this.code, m.expiresAt);
-        if (this.link) this.onLinkFailed("peer left");
+        if (!this.everAuthed) this.cb.onCode?.(this.code, m.expiresAt);
+        // The receiver's signaling dropping doesn't matter while our link is up.
+        if (this.link && !this.linkHealthy) this.onLinkFailed("peer left");
         break;
       case "signal":
         this.link?.handleSignal(m.data);
@@ -350,19 +430,91 @@ export class Sender extends Transfer {
     }
   }
 
-  private async session(link: PeerLink, dc: RTCDataChannel) {
-    const rd = this.attachReader(dc, () => rd.fail(new TransferError("protocol", "unexpected binary")));
-    send(dc, { t: "hello", v: PROTOCOL_VERSION });
-    const hello = await rd.expect("hello");
-    if (hello.v !== PROTOCOL_VERSION) throw new TransferError("protocol", "version mismatch");
+  private startLink() {
+    const link = this.newLink(true);
+    link.onopen = (dc) => this.runGuarded(link, () => this.session(link, dc));
+    link.start().catch(() => this.onLinkFailed("negotiation failed"));
+  }
 
-    try {
-      await this.authenticate(link, dc, rd, "sender", this.code);
-    } catch (e) {
-      if (e instanceof TransferError && e.code === "auth_failed") return this.rejectPeer(link);
-      throw e;
+  /** Our signaling connection dropped: take the room back with our token. */
+  protected onSignalingLost() {
+    if (!this.nameplate) return this.fail(new TransferError("signaling_failed"));
+    if (!this.linkHealthy) {
+      this.dropLink();
+      this.setPhase("reconnecting");
     }
-    this.sig.send({ t: "authed" });
+    void this.reclaim();
+  }
+
+  private async reclaim() {
+    if (this.reclaiming) return;
+    this.reclaiming = true;
+    try {
+      for (const delay of BACKOFF) {
+        await sleep(delay);
+        if (this.finished) return;
+        try {
+          const sig = await this.openSignaling();
+          sig.send({ t: "reclaim", nameplate: this.nameplate, token: this.token });
+          return;
+        } catch {
+          /* try again */
+        }
+      }
+      // Without signaling we can still finish over a healthy peer link.
+      if (!this.linkHealthy) this.fail(new TransferError("signaling_failed"));
+    } finally {
+      this.reclaiming = false;
+    }
+  }
+
+  protected override serverError(code: string) {
+    // A failed reclaim is fatal only if we can't finish over the current link.
+    if (this.linkHealthy && (code === "not_found" || code === "expired")) return;
+    super.serverError(code);
+  }
+
+  protected onLinkFailed(reason: string) {
+    const link = this.link;
+    if (!link) return;
+    if (this.phase === "authenticating") return this.rejectPeer(link);
+    const neverConnected = this.phase === "connecting-peer";
+    this.dropLink();
+    if (neverConnected && !this.everAuthed) {
+      // The receiver sees the failure itself; keep the code alive for a retry.
+      this.cb.onPeerUnreachable?.();
+      this.setPhase("waiting");
+      return;
+    }
+    if (this.everAuthed) {
+      // Resume when the receiver reconnects (it re-joins the room).
+      this.setPhase("reconnecting");
+      return;
+    }
+    this.fail(new TransferError(reason === "timeout" ? "connection_failed" : "peer_disconnected", reason));
+  }
+
+  protected override onAuthFailed(link: PeerLink) {
+    this.rejectPeer(link);
+  }
+
+  /**
+   * The receiver failed key confirmation. Drop it, tell the server (which
+   * burns the room after 3 failures) and keep waiting for the real receiver.
+   */
+  private rejectPeer(link: PeerLink) {
+    if (this.link !== link || this.finished) return;
+    this.dropLink();
+    this.authFailures++;
+    this.sig?.send({ t: "auth_failed" });
+    this.cb.onAuthFailure?.(this.authFailures, 3);
+    this.setPhase(this.idlePhase);
+  }
+
+  private async session(link: PeerLink, dc: RTCDataChannel) {
+    const rd = this.attachReader(link, dc, () => rd.fail(new TransferError("protocol", "unexpected binary")));
+    await this.handshake(link, dc, rd, "sender", this.code);
+    this.sig?.send({ t: "authed" });
 
     const meta = await this.meta;
     send(dc, { t: "meta", ...meta });
@@ -370,48 +522,21 @@ export class Sender extends Transfer {
     const resume = await rd.expect("resume");
     const have = parseRanges(resume.have, total);
     if (!have) throw new TransferError("protocol", "bad resume ranges");
+    const missing = missingRanges(have, total);
+    this.sessions.push({ skippedChunks: have.reduce((n, [a, b]) => n + b - a, 0) });
 
     this.setPhase("transferring");
-    await this.stream(link, dc, meta, missingRanges(have, total));
+    await this.stream(link, dc, meta, missing);
     send(dc, { t: "eof" });
     this.setPhase("verifying");
 
     const res = await rd.next();
     if (res.t === "ok") {
-      this.sig.send({ t: "done" });
+      this.sig?.send({ t: "done" });
       this.cb.onProgress(meta.size, meta.size);
       this.succeed();
     } else if (res.t === "hash_mismatch") throw new TransferError("hash_mismatch");
-    else if (res.t === "cancel") throw new TransferError("cancelled_by_peer");
     else throw new TransferError("protocol", `unexpected ${res.t}`);
-  }
-
-  /**
-   * The receiver failed key confirmation. Drop it, tell the server (which
-   * burns the room after 3 failures) and keep waiting for the real receiver.
-   */
-  protected override onLinkFailed(reason: string) {
-    const link = this.link;
-    if (link && this.phase === "authenticating") return this.rejectPeer(link);
-    if (link && this.phase === "connecting-peer") {
-      // The receiver will see the failure itself; keep the code alive for a retry.
-      link.close();
-      this.link = null;
-      this.cb.onPeerUnreachable?.();
-      this.setPhase("waiting");
-      return;
-    }
-    super.onLinkFailed(reason);
-  }
-
-  private rejectPeer(link: PeerLink) {
-    if (this.link !== link || this.finished) return;
-    link.close();
-    this.link = null;
-    this.authFailures++;
-    this.sig.send({ t: "auth_failed" });
-    this.cb.onAuthFailure?.(this.authFailures, 3);
-    this.setPhase("waiting");
   }
 
   private async stream(link: PeerLink, dc: RTCDataChannel, meta: FileMeta, ranges: Ranges) {
@@ -445,7 +570,7 @@ export class Sender extends Transfer {
       }
     } finally {
       clearInterval(ticker);
-      report();
+      if (this.link === link) report();
     }
   }
 }
@@ -455,6 +580,7 @@ export class Receiver extends Transfer {
   private meta: FileMeta | null = null;
   private chunks: (Uint8Array | undefined)[] = [];
   private received = 0;
+  private rejoining = false;
 
   constructor(code: string, cb: Callbacks, opts?: Options) {
     super(cb, opts);
@@ -463,18 +589,23 @@ export class Receiver extends Transfer {
 
   async start(): Promise<void> {
     if (!this.parsed) return this.fail(new TransferError("bad_code"));
+    this.setPhase("connecting");
     try {
-      await this.connectSignaling();
-      this.sig.send({ t: "join", nameplate: this.parsed.nameplate });
+      await this.join();
     } catch (e) {
       this.fail(e instanceof TransferError ? e : new TransferError("signaling_failed"));
     }
   }
 
+  private async join() {
+    const sig = await this.openSignaling();
+    sig.send({ t: "join", nameplate: this.parsed!.nameplate });
+  }
+
   protected onServer(m: ServerMessage) {
     switch (m.t) {
       case "joined":
-        this.setPhase("connecting-peer");
+        if (!this.everAuthed) this.setPhase("connecting-peer");
         break;
       case "signal":
         if (m.data.kind === "offer") {
@@ -483,17 +614,67 @@ export class Receiver extends Transfer {
         }
         this.link?.handleSignal(m.data);
         break;
+      case "peer_left":
+        // The sender's signaling dropped; it has a grace period to reclaim the room.
+        break;
       case "closed":
-        if (m.reason === "done" && this.phase === "done") return;
         this.onClosed(m.reason);
         break;
       case "error":
+        if (m.code === "room_full" && this.rejoining) return; // our old slot is still being released
         this.serverError(m.code);
         break;
     }
   }
 
-  private async session(_link: PeerLink, dc: RTCDataChannel) {
+  protected onSignalingLost() {
+    if (this.linkHealthy) return; // not needed until the link fails
+    if (this.everAuthed) void this.rejoin();
+    else this.fail(new TransferError("signaling_failed"));
+  }
+
+  protected onLinkFailed(reason: string) {
+    if (!this.link) return;
+    const phase = this.phase;
+    this.dropLink();
+    if (this.everAuthed) {
+      this.setPhase("reconnecting");
+      void this.rejoin();
+      return;
+    }
+    if (phase === "authenticating") this.fail(new TransferError("auth_failed", reason));
+    else this.fail(new TransferError(reason === "timeout" ? "connection_failed" : "peer_disconnected", reason));
+  }
+
+  /** Re-join the room with the same code; the sender re-offers and we resume. */
+  private async rejoin() {
+    if (this.rejoining) return;
+    this.rejoining = true;
+    try {
+      for (const delay of [...BACKOFF, 8000, 8000, 8000, 8000]) {
+        if (this.finished || this.linkHealthy) return;
+        // Drop our old slot first so the server sends the sender a fresh peer_joined.
+        const old = this.sig;
+        this.sig = null;
+        old?.close();
+        await sleep(delay);
+        if (this.finished) return;
+        try {
+          await this.join();
+          // Give the sender time to offer; a new link resets this loop.
+          await sleep(10_000);
+          if (this.link || this.finished) return;
+        } catch {
+          /* server unreachable; retry */
+        }
+      }
+      this.fail(new TransferError("peer_disconnected"));
+    } finally {
+      this.rejoining = false;
+    }
+  }
+
+  private async session(link: PeerLink, dc: RTCDataChannel) {
     // Chunks arrive in ascending order over the missing ranges; track position.
     let ranges: Ranges = [];
     let rangeIdx = 0;
@@ -507,7 +688,8 @@ export class Receiver extends Transfer {
     };
     const onBinary = (buf: ArrayBuffer) => {
       const meta = this.meta;
-      if (!meta || rangeIdx >= ranges.length) return rd.fail(new TransferError("protocol", "unexpected chunk"));
+      if (!meta || rangeIdx >= ranges.length || this.link !== link)
+        return rd.fail(new TransferError("protocol", "unexpected chunk"));
       const total = chunkCount(meta.size);
       const want = next === total - 1 ? meta.size - next * CHUNK_SIZE : CHUNK_SIZE;
       if (buf.byteLength !== want) return rd.fail(new TransferError("protocol", "bad chunk size"));
@@ -518,13 +700,9 @@ export class Receiver extends Transfer {
       advance();
       this.cb.onProgress(this.received, meta.size);
     };
-    const rd = this.attachReader(dc, onBinary);
+    const rd = this.attachReader(link, dc, onBinary);
 
-    send(dc, { t: "hello", v: PROTOCOL_VERSION });
-    const hello = await rd.expect("hello");
-    if (hello.v !== PROTOCOL_VERSION) throw new TransferError("protocol", "version mismatch");
-
-    await this.authenticate(_link, dc, rd, "receiver", this.parsed!.code);
+    await this.handshake(link, dc, rd, "receiver", this.parsed!.code);
 
     const meta = await rd.expect("meta");
     const { t: _t, ...fm } = meta;
@@ -537,7 +715,8 @@ export class Receiver extends Transfer {
       this.cb.onMeta?.(fm);
     }
     const total = chunkCount(fm.size);
-    const have = bitmapToRanges((i) => this.chunks[i] !== undefined, total);
+    // Report what we already hold so the sender skips it.
+    const have = bitmapToRanges((i) => this.chunks[i] !== undefined, total).slice(0, MAX_RANGES);
     ranges = missingRanges(have, total);
     rangeIdx = 0;
     next = ranges.length ? ranges[0]![0] : 0;
@@ -558,6 +737,7 @@ export class Receiver extends Transfer {
       throw new TransferError("hash_mismatch");
     }
     send(dc, { t: "ok" });
+    this.sig?.send({ t: "done" });
     const blob = new Blob(this.chunks as BlobPart[], { type: fm.mime });
     this.chunks = [];
     this.cb.onComplete?.({ blob, name: fm.name });

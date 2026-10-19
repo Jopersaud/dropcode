@@ -52,6 +52,10 @@ class Panel {
     this.section.dataset.phase = p;
     const status = $(`${this.prefix}-status`);
     if (p === "done") status.textContent = doneText ?? "Done.";
+    else if (p === "reconnecting" && this.prefix === "send")
+      status.textContent = "Connection to the receiver lost. Keep this page open: the transfer resumes where it left off when they reconnect.";
+    else if (p === "reconnecting")
+      status.textContent = "Connection lost. Reconnecting; the transfer will resume where it left off…";
     else status.textContent = STATUS[p as Phase] ?? "";
     if (p === "transferring") this.meter.reset();
     if (p === "done") this.progress(this.total, this.total);

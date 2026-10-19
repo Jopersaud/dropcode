@@ -66,10 +66,13 @@ export async function launch() {
   const browser = await chromium.launch({
     args: ["--disable-features=WebRtcHideLocalIpsWithMdns"],
   });
+  let n = 0;
   const newPage = async () => {
+    const label = `page${++n}`;
     const ctx = await browser.newContext({ acceptDownloads: true });
     const page = await ctx.newPage();
     page.on("pageerror", (e) => console.error("[pageerror]", e.message));
+    if (process.env.E2E_DEBUG) page.on("console", (m) => console.log(`  [${label}] ${m.text()}`));
     return page;
   };
   return { browser, newPage };

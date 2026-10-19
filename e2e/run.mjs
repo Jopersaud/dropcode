@@ -56,6 +56,38 @@ async function expectError(page, card, code, timeout = 20_000) {
   assert(got === code, `#${card} error: expected ${code}, got ${got}`);
 }
 
+async function resumeScenario(ctx, breakIt, { expectResume = true } = {}) {
+  const size = 64 * 1024 * 1024;
+  const { file, sender, receiver } = await midTransfer(ctx, size);
+  const dl = receiver.waitForEvent("download", { timeout: 120_000 });
+  dl.catch(() => {});
+  await waitPercent(receiver, "#receive-stats", 30);
+  const before = Number(await receiver.getAttribute("#receive-stats", "data-percent"));
+  await breakIt({ sender, receiver });
+  if (expectResume) {
+    await receiver.waitForSelector('#receive[data-phase="reconnecting"]', { timeout: 15_000 });
+    console.log(`  broke at ${before}%; receiver: "${await receiver.textContent("#receive-status")}"`);
+  }
+  const out = join(tmp, `received-${file.path.split("/").pop()}`);
+  await (await dl).saveAs(out);
+  assert((await sha256File(out)) === file.sha256, "hash matches after interruption");
+  await sender.waitForSelector('#send[data-phase="done"]', { timeout: 10_000 });
+  const { sessions, chunksSent } = await sender.evaluate(() => ({
+    sessions: window.__sender.sessions,
+    chunksSent: window.__sender.chunksSent,
+  }));
+  const total = Math.ceil(size / 65536);
+  console.log(`  sessions: ${JSON.stringify(sessions)}; chunks sent ${chunksSent} for ${total} chunks`);
+  if (expectResume) {
+    assert(sessions.length === 2, "exactly one resumed session");
+    assert(sessions[1].skippedChunks >= Math.floor((total * before) / 100) - 1, "resumed session skipped what the receiver had");
+    // At most the in-flight send buffer (4 MiB = 64 chunks) plus a little is resent.
+    assert(chunksSent <= total + 128, `resent too much: ${chunksSent - total} extra chunks`);
+  } else {
+    assert(sessions.length === 1 && chunksSent === total, "transfer continued on the same link");
+  }
+}
+
 const wrongCode = (code) => code.replace(/-[a-z]+$/, code.endsWith("-abandon") ? "-zoo" : "-abandon");
 
 const scenarios = {
@@ -165,10 +197,48 @@ const scenarios = {
   },
 
   async "peer-disconnect"(ctx) {
+    // The receiver vanishes for good (tab closed). The sender keeps the code
+    // alive so the receiver could come back and resume, and says so.
     const { sender, receiver } = await midTransfer(ctx);
     await receiver.context().close();
-    await expectError(sender, "send", "peer_disconnected", 20_000);
-    console.log(`  sender sees: "${await sender.textContent("#send-error")}"`);
+    await sender.waitForSelector('#send[data-phase="reconnecting"]', { timeout: 20_000 });
+    console.log(`  sender sees: "${await sender.textContent("#send-status")}"`);
+    // A receiver that comes back without its buffered chunks restarts from zero.
+    await sender.click("#send-cancel");
+  },
+
+  async "resume-link"(ctx) {
+    // Simulate the peer connection dying mid-transfer.
+    await resumeScenario(ctx, async ({ receiver }) => {
+      await receiver.evaluate(() => window.__receiver.link.dc.close());
+    });
+  },
+
+  async "resume-sender-signaling"(ctx) {
+    // The sender's WebSocket drops; the transfer keeps going over WebRTC and
+    // the sender reclaims its room in the background.
+    await resumeScenario(ctx, async ({ sender }) => {
+      await sender.evaluate(() => window.__sender.sig.ws.close());
+    }, { expectResume: false });
+    assert(ctx.server.logs.some((l) => l.includes('"room_reclaimed"')), "sender reclaimed its room");
+  },
+
+  async "resume-receiver-signaling"(ctx) {
+    await resumeScenario(ctx, async ({ receiver }) => {
+      await receiver.evaluate(() => window.__receiver.sig.ws.close());
+    }, { expectResume: false });
+  },
+
+  async "resume-both"(ctx) {
+    // Sender loses signaling and the link at once (e.g. switched networks):
+    // it reclaims the room, the receiver re-joins, and the transfer resumes.
+    await resumeScenario(ctx, async ({ sender }) => {
+      await sender.evaluate(() => {
+        window.__sender.sig.ws.close();
+        window.__sender.link.dc.close();
+      });
+    });
+    assert(ctx.server.logs.some((l) => l.includes('"room_reclaimed"')), "sender reclaimed its room");
   },
 
   async "hash-mismatch"(ctx) {
