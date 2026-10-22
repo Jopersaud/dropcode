@@ -24,6 +24,8 @@ export class PeerLink {
   onopen: (dc: RTCDataChannel) => void = () => {};
   /** Fired at most once, when the link can no longer be used. */
   onfail: (reason: string) => void = () => {};
+  /** Fired when ICE has settled on a path, so the route can be inspected. */
+  onconnected: () => void = () => {};
 
   constructor(
     config: RTCConfiguration,
@@ -37,7 +39,8 @@ export class PeerLink {
     };
     this.pc.onconnectionstatechange = () => {
       const s = this.pc.connectionState;
-      if (s === "failed") this.fail("connection failed");
+      if (s === "connected") this.onconnected();
+      else if (s === "failed") this.fail("connection failed");
       else if (s === "disconnected") {
         // Transient blips are common on network changes; give ICE a moment.
         clearTimeout(this.disconnectTimer);

@@ -17,6 +17,8 @@ import {
 } from "./peer-protocol.ts";
 import { AuthError, authenticate, type AuthChannel, type Role } from "./auth.ts";
 import { PeerLink } from "./rtc.ts";
+import { DEFAULT_NET_MODE, iceConfigFor, type NetMode } from "./netmode.ts";
+import { readRoute, type RouteInfo } from "./route.ts";
 import { Signaling, defaultSignalingUrl, type ServerMessage } from "./signaling.ts";
 import { formatCode, parseCode, randomWords } from "./words.ts";
 
@@ -74,10 +76,16 @@ export interface Callbacks {
   onAuthFailure?(attempt: number, max: number): void;
   /** Sender only: a receiver could not establish a peer connection; still waiting. */
   onPeerUnreachable?(): void;
+  /** How the connected peers reached each other (direct, local, or relayed). */
+  onRoute?(route: RouteInfo): void;
+  /** The server's ICE policy, learned from its hello. */
+  onServerPolicy?(policy: RTCIceTransportPolicy): void;
 }
 
 export interface Options {
   signalingUrl?: string;
+  /** "local" refuses STUN/TURN, so the transfer only works on one network. */
+  netMode?: NetMode;
 }
 
 const SERVER_ERRORS: Record<string, ErrorCode> = {
@@ -186,6 +194,7 @@ abstract class Transfer {
     });
     this.iceServers = hello.iceServers;
     this.icePolicy = hello.iceTransportPolicy === "relay" ? "relay" : "all";
+    this.cb.onServerPolicy?.(this.icePolicy);
     return sig;
   }
 
@@ -260,11 +269,17 @@ abstract class Transfer {
   protected newLink(initiator: boolean): PeerLink {
     this.dropLink();
     const link = new PeerLink(
-      { iceServers: this.iceServers, iceTransportPolicy: this.icePolicy },
+      iceConfigFor(this.opts.netMode ?? DEFAULT_NET_MODE, this.iceServers, this.icePolicy),
       (data) => this.sig?.send({ t: "signal", data }),
       initiator,
     );
     this.link = link;
+    link.onconnected = () => {
+      if (this.link !== link || this.finished) return;
+      void readRoute(link.pc).then((r) => {
+        if (this.link === link && !this.finished) this.cb.onRoute?.(r);
+      });
+    };
     this.setPhase("connecting-peer");
     link.onfail = (reason) => {
       if (this.link !== link || this.finished) return;

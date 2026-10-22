@@ -12,25 +12,45 @@
     <header>
       <h1>dropcode</h1>
       <p class="tagline">Send a file to anyone with a short code. Peer to peer, end-to-end authenticated, no accounts.</p>
+
+      <fieldset id="net-mode" class="net-mode">
+        <legend class="visually-hidden">Which networks to use</legend>
+        <label>
+          <input type="radio" name="net-mode" value="any" checked>
+          <span class="net-mode-label">Any network</span>
+          <span class="net-mode-hint">Works anywhere. Falls back to a relay if there is no direct path.</span>
+        </label>
+        <label>
+          <input type="radio" name="net-mode" value="local">
+          <span class="net-mode-label">Same network only</span>
+          <span class="net-mode-hint">Both devices on this Wi-Fi. Always direct, never relayed.</span>
+        </label>
+        <p id="net-mode-note" class="hint" hidden></p>
+      </fieldset>
     </header>
 
     <section id="send" class="card" data-phase="idle" aria-labelledby="send-title">
       <h2 id="send-title">Send</h2>
 
       <label id="drop-zone" class="drop-zone" data-show="idle">
-        <input type="file" id="send-file">
-        <span class="drop-main">Drop a file here</span>
-        <span class="drop-sub">or click to choose one</span>
+        <input type="file" id="send-file" multiple>
+        <span class="drop-main">Drop files here</span>
+        <span class="drop-sub">or click to choose them</span>
       </label>
 
       <div class="file-info" data-show="active">
         <span id="send-name" class="file-name"></span>
         <span id="send-size" class="file-size"></span>
       </div>
+      <ul id="send-files" class="file-list" hidden></ul>
 
       <div class="code-box" data-show="waiting">
         <p class="hint">Give the receiver this code:</p>
         <p id="send-code" class="code"></p>
+        <div id="qr" class="qr" hidden>
+          <p class="hint">or scan this with the other device's camera:</p>
+          <div id="qr-box" class="qr-box"></div>
+        </div>
         <div class="row">
           <button type="button" id="copy-code" class="secondary">Copy code</button>
           <button type="button" id="copy-link" class="secondary">Copy link</button>
@@ -44,6 +64,7 @@
       </div>
 
       <p id="send-status" class="status" role="status" aria-live="polite"></p>
+      <p id="send-route" class="route" hidden></p>
       <p id="send-notice" class="notice" role="status" hidden></p>
       <p id="send-error" class="error" role="alert" hidden></p>
 
@@ -73,8 +94,18 @@
       </div>
 
       <p id="receive-status" class="status" role="status" aria-live="polite"></p>
+      <p id="receive-route" class="route" hidden></p>
       <p id="receive-error" class="error" role="alert" hidden></p>
       <a id="download-link" class="button" data-show="done">Save file</a>
+
+      <div id="receive-bundle" hidden>
+        <p id="receive-bundle-hint" class="hint"></p>
+        <ul id="receive-files" class="file-list saveable"></ul>
+        <div class="row">
+          <button type="button" id="save-all">Save all</button>
+          <button type="button" id="save-zip" class="secondary">Save as .zip</button>
+        </div>
+      </div>
 
       <div class="row">
         <button type="button" id="receive-cancel" class="danger" data-show="cancellable">Cancel</button>

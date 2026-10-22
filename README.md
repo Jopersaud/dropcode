@@ -3,8 +3,9 @@
 Send a file to anyone with a short code, peer to peer, with no accounts.
 
 ```
-sender:    pick a file  ->  gets  7-guitar-ocean
+sender:    pick a file (or several)  ->  gets  7-guitar-ocean
 receiver:  types 7-guitar-ocean  ->  gets the file
+           (or scans the sender's QR code)
 ```
 
 - **Peer to peer.** File bytes go over a WebRTC data channel, directly between the two
@@ -27,7 +28,7 @@ See [DECISIONS.md](DECISIONS.md) for the design and security reasoning.
 | Path | What |
 | --- | --- |
 | `server/` | Signaling server (Node 22 + TypeScript + `ws`): rooms, TTLs, rate limits, static files |
-| `web/` | Web client (vanilla TypeScript, bundled with esbuild) |
+| `web/` | Web client (vanilla TypeScript, bundled with esbuild); `zip.ts` bundles multiple files, `qr.ts` renders the share link as a QR code |
 | `cli/` | Go CLI (`pion/webrtc`) |
 | `pake/` | SPAKE2 WebAssembly module (Rust, RustCrypto `spake2`) shared by web and CLI |
 | `shared/` | Word list, built `pake.wasm`, key-confirmation test vectors |
@@ -186,6 +187,12 @@ E2E_SERVER_URL=http://127.0.0.1:8080 E2E_EXPECT_RELAY=1 node e2e/run.mjs basic c
 
 - The browser receiver buffers the file in memory (2 GB cap); use the CLI for larger
   files. Browser resume survives connection loss but not a page reload.
-- One file per transfer (zip folders first).
+- Several files can be sent at once: the browser bundles them into a stored (uncompressed)
+  zip and the receiving browser expands it again, so the receiver saves the original files
+  individually, all at once through the system share sheet where one is available, or keeps
+  the `.zip`. One file is sent as itself, with no wrapper. The bundle is capped at 4 GB by
+  zip's 32-bit fields, and counts against the browser receiver's 2 GB memory limit.
+  The protocol still carries exactly one file, so there is no per-file progress, and a CLI
+  receiver saves the `.zip` rather than its contents. Folders must still be zipped first.
 - Server state is in memory: a restart drops waiting codes, and the server can't be
   horizontally scaled without shared room state.

@@ -4,6 +4,7 @@ import { mitmPageScript, startEvilServer } from "./evil-server.mjs";
 import { existsSync, readdirSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { assert, cliBin, runCli, launch, makeFile, randomName, sha256File, startServer, tmp } from "./lib.mjs";
+import { encodeQr } from "../web/src/qr.ts";
 
 const SIZE = Number(process.env.E2E_SIZE ?? 50 * 1024 * 1024);
 
@@ -152,6 +153,77 @@ const scenarios = {
     await startReceive(late, server.url, code);
     await expectError(late, "receive", "used", 10_000);
     console.log("  reusing the code fails with 'used'");
+  },
+
+  // The share link is offered as a scannable QR code, so a phone can join
+  // without anyone typing a URL. The rendered symbol must match what the
+  // encoder produces for that exact link.
+  async qr({ server, newPage }) {
+    const file = await makeFile(randomName(), 1024);
+    const sender = await newPage();
+    const code = await sendAndGetCode(sender, server.url, file.path);
+
+    await sender.waitForSelector("#qr:not([hidden])", { timeout: 10_000 });
+    const got = await sender.$eval("#qr-box svg", (svg) => ({
+      viewBox: svg.getAttribute("viewBox"),
+      label: svg.getAttribute("aria-label"),
+      darks: (svg.querySelector("path").getAttribute("d").match(/M/g) ?? []).length,
+    }));
+
+    const link = `${server.url}/#${code}`;
+    assert(got.label.includes(link), `QR labelled for ${link}, got ${got.label}`);
+    const expected = encodeQr(link, "M");
+    assert(expected !== null, "link should be encodable");
+    const span = expected.size + 8; // the four-module quiet zone on each side
+    assert(got.viewBox === `0 0 ${span} ${span}`, `viewBox ${got.viewBox} != 0 0 ${span} ${span}`);
+    const darkCount = expected.modules.filter(Boolean).length;
+    assert(got.darks === darkCount, `rendered ${got.darks} dark modules, encoder says ${darkCount}`);
+    console.log(`  QR v${expected.version} (${expected.size}x${expected.size}) matches the encoder for the share link`);
+  },
+
+  // Several files are bundled into a stored zip on the wire and expanded again
+  // in the receiving browser, which must hand back the original files byte for byte.
+  async multifile({ server, newPage }) {
+    const files = [
+      await makeFile("multi-a.bin", 3 * 1024 * 1024),
+      await makeFile("multi-b.bin", 1024 * 1024),
+      await makeFile("multi-c.bin", 1),
+    ];
+    const sender = await newPage();
+    const receiver = await newPage();
+    await sender.goto(server.url);
+    await sender.setInputFiles("#send-file", files.map((f) => f.path));
+    await sender.waitForSelector("#send-code:not([hidden])", { timeout: 30_000 });
+    const code = (await sender.textContent("#send-code")).trim();
+
+    // The sender lists what it is about to send.
+    const listed = await sender.$$eval("#send-files .file-name", (n) => n.map((e) => e.textContent));
+    assert(listed.length === 3, `sender listed ${listed.length} files`);
+
+    await startReceive(receiver, server.url, code);
+    await receiver.waitForSelector("#receive-bundle:not([hidden])", { timeout: 120_000 });
+    const names = await receiver.$$eval("#receive-files .file-name", (n) => n.map((e) => e.textContent));
+    assert(names.join(",") === "multi-a.bin,multi-b.bin,multi-c.bin", `received names: ${names}`);
+
+    // Save each expanded file and compare against what was sent.
+    for (const [i, f] of files.entries()) {
+      const dl = receiver.waitForEvent("download", { timeout: 30_000 });
+      await receiver.click(`#receive-files li:nth-child(${i + 1}) button`);
+      const download = await dl;
+      assert(download.suggestedFilename() === f.path.split("/").pop(), `name ${download.suggestedFilename()}`);
+      const out = join(tmp, `received-multi-${i}.bin`);
+      await download.saveAs(out);
+      const got = await sha256File(out);
+      assert(got === f.sha256, `file ${i} hash ${got} != ${f.sha256}`);
+    }
+    console.log(`  3 files expanded in the browser, all hashes match`);
+
+    // The archive itself is still available for whoever would rather have one file.
+    const zdl = receiver.waitForEvent("download", { timeout: 30_000 });
+    await receiver.click("#save-zip");
+    const zip = await zdl;
+    assert(zip.suggestedFilename() === "dropcode-3-files.zip", `zip name ${zip.suggestedFilename()}`);
+    console.log("  'Save as .zip' offers the bundle intact");
   },
 
   async dragdrop({ server, newPage }) {
