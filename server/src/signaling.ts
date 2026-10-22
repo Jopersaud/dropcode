@@ -2,9 +2,10 @@ import type { IncomingMessage } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import { iceServersFor, type ServerConfig } from "./config.ts";
 import { log } from "./log.ts";
-import { MAX_MESSAGE_BYTES, parseClientMessage, type ServerMessage } from "./protocol.ts";
+import { MAX_MESSAGE_BYTES, parseClientMessage, type IceServer, type ServerMessage } from "./protocol.ts";
 import { TokenBucket } from "./ratelimit.ts";
 import { RoomManager, type Peer, type RoomOptions } from "./rooms.ts";
+import { CloudflareTurn } from "./turn-cloudflare.ts";
 
 export interface SignalingOptions {
   rooms?: Partial<RoomOptions>;
@@ -12,6 +13,22 @@ export interface SignalingOptions {
   /** Messages per second a single connection may send (burst = 4x). */
   messagesPerSec?: number;
   heartbeatMs?: number;
+  /** Overrides the provider built from `cfg` (tests inject a stub). */
+  turnProvider?: TurnProvider | null;
+}
+
+/** Mints ICE servers that cannot be computed locally. Must never reject. */
+export interface TurnProvider {
+  iceServers(): Promise<IceServer[]>;
+}
+
+export function turnProviderFor(cfg: ServerConfig): TurnProvider | null {
+  if (!cfg.turnCloudflareKeyId || !cfg.turnCloudflareApiToken) return null;
+  return new CloudflareTurn({
+    keyId: cfg.turnCloudflareKeyId,
+    apiToken: cfg.turnCloudflareApiToken,
+    ttlSec: cfg.turnCredentialTtlSec,
+  });
 }
 
 export function clientIp(req: IncomingMessage, trustProxy: ServerConfig["trustProxy"]): string {
@@ -28,6 +45,7 @@ export function clientIp(req: IncomingMessage, trustProxy: ServerConfig["trustPr
 
 export function createSignaling(cfg: ServerConfig, opts: SignalingOptions = {}) {
   const rooms = new RoomManager(opts.rooms);
+  const turn = opts.turnProvider === undefined ? turnProviderFor(cfg) : opts.turnProvider;
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
   const perIp = new Map<string, number>();
   const maxPerIp = opts.maxConnectionsPerIp ?? 20;
@@ -75,12 +93,18 @@ export function createSignaling(cfg: ServerConfig, opts: SignalingOptions = {}) 
       ws.close(1008);
     };
 
-    peer.send({
-      t: "hello",
-      iceServers: iceServersFor(cfg),
-      iceTransportPolicy: cfg.iceTransportPolicy,
-      ttlMs: rooms.opts.ttlMs,
-    });
+    // Clients wait for `hello` before sending anything, so minting credentials
+    // here only delays the first connection after a cold cache.
+    void (async () => {
+      const minted = turn ? await turn.iceServers() : [];
+      if (ws.readyState !== ws.OPEN) return;
+      peer.send({
+        t: "hello",
+        iceServers: iceServersFor(cfg, Date.now(), minted),
+        iceTransportPolicy: cfg.iceTransportPolicy,
+        ttlMs: rooms.opts.ttlMs,
+      });
+    })();
 
     ws.on("message", (data, isBinary) => {
       if (!bucket.take()) return reject("rate_limited");
@@ -150,5 +174,5 @@ export function createSignaling(cfg: ServerConfig, opts: SignalingOptions = {}) 
     wss.close();
   }
 
-  return { wss, rooms, handleUpgrade, close };
+  return { wss, rooms, turn, handleUpgrade, close };
 }

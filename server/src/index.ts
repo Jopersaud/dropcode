@@ -12,9 +12,13 @@ app.server.listen(cfg.port, cfg.host, () => {
   const addr = app.server.address();
   log("listening", {
     port: typeof addr === "object" && addr ? addr.port : cfg.port,
-    turn: cfg.turnUrls.length > 0,
+    turn: cfg.turnUrls.length > 0 || app.turn !== null,
+    turnProvider: app.turn ? "cloudflare" : cfg.turnUrls.length ? "static" : "none",
     relayOnly: cfg.iceTransportPolicy === "relay",
   });
+  // Prime the credential cache so a bad key id or token is reported at startup
+  // rather than on the first transfer, and the first client isn't kept waiting.
+  void app.turn?.iceServers();
 });
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {

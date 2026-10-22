@@ -12,7 +12,7 @@
     "build:web": "node scripts/build-web.mjs",
     "build:server": "esbuild server/src/index.ts --bundle --platform=node --target=node22 --format=esm --outfile=server/dist/index.js --external:bufferutil --external:utf-8-validate \"--banner:js=import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\"",
     "build": "npm run build:web && npm run build:server",
-    "start": "node server/dist/index.js",
+    "start": "node --env-file-if-exists=.env server/dist/index.js",
     "dev": "npm run build && npm start",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",

@@ -94,6 +94,7 @@ All configuration is through environment variables on the server.
 | `STUN_URLS` | `stun:stun.l.google.com:19302` | Comma-separated STUN URLs; empty to disable |
 | `TURN_URL` | (unset) | Comma-separated TURN URLs, e.g. `turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349` |
 | `TURN_SECRET` | (unset) | coturn `static-auth-secret`: the server mints a short-lived username/password per client (recommended) |
+| `TURN_CLOUDFLARE_KEY_ID`, `TURN_CLOUDFLARE_API_TOKEN` | (unset) | Cloudflare Realtime TURN. Set both and the server mints credentials from Cloudflare's REST API and appends their relays to `TURN_URL`'s; no `TURN_URL` needed. |
 | `TURN_USER`, `TURN_PASS` | (unset) | Static TURN credentials, used if `TURN_SECRET` is not set |
 | `TURN_CREDENTIAL_TTL` | `3600` | Lifetime in seconds of minted TURN credentials |
 | `ICE_TRANSPORT_POLICY` | `all` | `relay` forces every transfer through TURN, so peers never learn each other's IP addresses |
@@ -160,9 +161,16 @@ relays the (still DTLS-encrypted) data, so it costs bandwidth. Options:
    `docker compose up -d coturn`, with `PUBLIC_IP` and `TURN_SECRET` in `.env`. Then
    point the server at it with `TURN_URL=turn:<PUBLIC_IP>:3478?transport=udp,turn:<PUBLIC_IP>:3478?transport=tcp`
    and the same `TURN_SECRET`.
-2. **A managed TURN service** (Cloudflare Realtime TURN, Twilio, Metered, …). Most issue
-   static or API-minted credentials: set `TURN_URL`, `TURN_USER`, `TURN_PASS`.
-3. **TLS on 443** for the most restrictive networks. Give coturn a certificate (`cert=`,
+2. **Cloudflare Realtime TURN** (no VPS, works from cellular). Create a TURN key at
+   *dash.cloudflare.com -> Realtime -> TURN Keys* and set `TURN_CLOUDFLARE_KEY_ID` and
+   `TURN_CLOUDFLARE_API_TOKEN`. Unlike coturn, it mints credentials through its own REST
+   API, so the server fetches them at startup and re-mints shortly before they expire; one
+   set is shared by all clients. If the API is unreachable the server logs
+   `turn_mint_failed`, serves STUN only, and retries after 30s. The first 1,000 GB/month
+   are free (shared with the Realtime SFU), then $0.05/GB.
+3. **Another managed TURN service** (Twilio, Metered, …) issuing static credentials: set
+   `TURN_URL`, `TURN_USER`, `TURN_PASS`.
+4. **TLS on 443** for the most restrictive networks. Give coturn a certificate (`cert=`,
    `pkey=`, `tls-listening-port=443`) and add a `turns:turn.example.com:443?transport=tcp`
    URL.
 

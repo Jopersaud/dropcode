@@ -61,6 +61,7 @@ export function createAppServer(cfg: ServerConfig, opts: SignalingOptions = {}) 
   return {
     server,
     signaling,
+    turn: signaling.turn,
     close: () =>
       new Promise<void>((resolve) => {
         signaling.close();

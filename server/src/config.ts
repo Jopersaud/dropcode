@@ -12,6 +12,9 @@ export interface ServerConfig {
   turnPass: string;
   /** coturn `static-auth-secret`; when set, short-lived TURN credentials are minted per client. */
   turnSecret: string;
+  /** Cloudflare Realtime TURN key id; with the API token, credentials are minted over their REST API. */
+  turnCloudflareKeyId: string;
+  turnCloudflareApiToken: string;
   turnCredentialTtlSec: number;
   webRoot: string;
   /** "relay" forces all peers through TURN (hides IPs from each other); default "all". */
@@ -34,6 +37,8 @@ export function loadConfig(env: NodeJS.ProcessEnv, webRoot: string): ServerConfi
     turnUser: env.TURN_USER ?? "",
     turnPass: env.TURN_PASS ?? "",
     turnSecret: env.TURN_SECRET ?? "",
+    turnCloudflareKeyId: env.TURN_CLOUDFLARE_KEY_ID ?? "",
+    turnCloudflareApiToken: env.TURN_CLOUDFLARE_API_TOKEN ?? "",
     turnCredentialTtlSec: Number(env.TURN_CREDENTIAL_TTL ?? 3600),
     webRoot: env.WEB_ROOT ?? webRoot,
     iceTransportPolicy: env.ICE_TRANSPORT_POLICY === "relay" ? "relay" : "all",
@@ -41,7 +46,15 @@ export function loadConfig(env: NodeJS.ProcessEnv, webRoot: string): ServerConfi
   };
 }
 
-export function iceServersFor(cfg: ServerConfig, nowMs = Date.now()): IceServer[] {
+/**
+ * `extra` carries servers minted by an external provider (Cloudflare Realtime
+ * TURN), which are fetched asynchronously and so cannot be computed here.
+ */
+export function iceServersFor(
+  cfg: ServerConfig,
+  nowMs = Date.now(),
+  extra: IceServer[] = [],
+): IceServer[] {
   const servers: IceServer[] = [];
   if (cfg.stunUrls.length) servers.push({ urls: cfg.stunUrls });
   if (cfg.turnUrls.length) {
@@ -55,5 +68,6 @@ export function iceServersFor(cfg: ServerConfig, nowMs = Date.now()): IceServer[
       servers.push({ urls: cfg.turnUrls, username: cfg.turnUser, credential: cfg.turnPass });
     }
   }
+  servers.push(...extra);
   return servers;
 }
