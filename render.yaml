@@ -1,0 +1,37 @@
+# Render Blueprint for the dropcode signaling server + web client.
+#
+# Rooms live in memory, so this must stay a single instance: no scaling, no
+# second replica. The free plan gives exactly that. A free instance also sleeps
+# after ~15 minutes with no traffic, which costs a cold start on the next page
+# load but cannot interrupt a transfer: the sender holds a WebSocket open for
+# the whole thing, and an open connection counts as traffic.
+services:
+  - type: web
+    name: dropcode
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      # Match the port the Dockerfile exposes and health-checks.
+      - key: PORT
+        value: 8080
+
+      # TRUST_PROXY is deliberately NOT set.
+      #
+      # Render's proxy appends to any X-Forwarded-For the client sent instead of
+      # replacing it, so the left-most entry -- the one clientIp() reads -- is
+      # attacker-controlled. Setting "xff" here would let anyone forge their
+      # address and walk past the per-IP limits.
+      #
+      # Leaving it unset means every client is seen as Render's proxy address,
+      # so the 20-connections-per-IP cap applies to the service as a whole:
+      # roughly ten concurrent transfers. That is a ceiling, not a hole, and the
+      # right trade for a personal deployment. Raising it safely needs clientIp()
+      # to count trusted hops from the right rather than take the left-most.
+      #
+      # Code guessing is unaffected either way: a code is burned after three
+      # wrong attempts, enforced per room on the server, not per IP.

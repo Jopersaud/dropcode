@@ -135,6 +135,22 @@ This runs dropcode on `:8080` and coturn on `3478/udp+tcp` with relay ports
 
 Put TLS in front of `:8080` (Caddy, nginx, Traefik) and set `TRUST_PROXY=xff`.
 
+### Render
+
+`render.yaml` deploys the Docker image as a single free-plan web service with
+HTTPS on a `*.onrender.com` address. Create a Blueprint from the repository at
+[dashboard.render.com](https://dashboard.render.com) and Render reads the file.
+
+A free instance sleeps after about 15 minutes without traffic, so the first page
+load afterwards waits on a cold start. It cannot interrupt a transfer: the
+sender holds a WebSocket open throughout, and that counts as traffic.
+
+`TRUST_PROXY` is deliberately unset there. Render appends to a client-supplied
+`X-Forwarded-For` rather than replacing it, so the left-most entry is
+attacker-controlled and `xff` would let anyone forge an address past the per-IP
+limits. The cost is that every client looks like Render's proxy, so the
+20-connections-per-IP cap applies service-wide (about ten concurrent transfers).
+
 ### Fly.io
 
 Rooms live in memory, so the server must run as **exactly one machine** that never
