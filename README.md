@@ -2,6 +2,12 @@
 
 Send a file to anyone with a short code, peer to peer, with no accounts.
 
+**Try it: [dropcode-vitv.onrender.com](https://dropcode-vitv.onrender.com)** — open it in two
+browser windows, or on a laptop and a phone on the same Wi-Fi. It runs on a free instance
+that sleeps when idle, so the first load after a quiet spell takes about a minute; once it
+is up, transfers are unaffected. No TURN relay is configured there, so a phone on cellular
+will not connect.
+
 ```
 sender:    pick a file (or several)  ->  gets  7-guitar-ocean
 receiver:  types 7-guitar-ocean  ->  gets the file
